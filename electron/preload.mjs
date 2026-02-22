@@ -11,4 +11,11 @@ contextBridge.exposeInMainWorld("electronAPI", {
       ipcRenderer.removeListener("queue-updated", wrapped);
     };
   },
+  onDependencyBootstrapUpdated(listener) {
+    const wrapped = (_event, payload) => listener(payload);
+    ipcRenderer.on("dependency-bootstrap-updated", wrapped);
+    return () => {
+      ipcRenderer.removeListener("dependency-bootstrap-updated", wrapped);
+    };
+  },
 });

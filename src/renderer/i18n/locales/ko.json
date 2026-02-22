@@ -72,5 +72,20 @@
       "latest": "최신 버전입니다.",
       "available": "새 버전 {{version}} 이(가) 있습니다."
     }
+  },
+  "bootstrap": {
+    "title": "필수 구성요소를 준비하고 있습니다",
+    "subtitle": "초기 실행 시 yt-dlp / ffmpeg를 설치 또는 점검합니다.",
+    "progressUnknown": "진행률 계산 중...",
+    "steps": {
+      "idle": "대기 중",
+      "preparing": "설치 준비 중",
+      "checkingYtDlp": "yt-dlp 상태 점검 중",
+      "downloadingYtDlp": "yt-dlp 다운로드 중",
+      "checkingFfmpeg": "ffmpeg 상태 점검 중",
+      "installingFfmpeg": "ffmpeg 설치 중",
+      "ready": "준비 완료",
+      "failed": "준비 실패"
+    }
   }
 }

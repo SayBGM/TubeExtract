@@ -1,6 +1,6 @@
 import { Download, FolderOpen } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import { useFormContext } from "react-hook-form";
+import { useFormContext, useWatch } from "react-hook-form";
 import type { AppSettings } from "../../../types";
 
 interface SettingsDefaultsSectionProps {
@@ -13,7 +13,8 @@ export function SettingsDefaultsSection({
   onPickDownloadDir,
 }: SettingsDefaultsSectionProps) {
   const { t } = useTranslation();
-  const { register } = useFormContext<AppSettings>();
+  const { control, register } = useFormContext<AppSettings>();
+  const downloadDir = useWatch({ control, name: "downloadDir" });
 
   return (
     <div className="bg-zinc-900 border border-zinc-800 rounded-2xl overflow-hidden">
@@ -26,7 +27,10 @@ export function SettingsDefaultsSection({
       <div className="p-6 space-y-6">
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
           <div>
-            <label htmlFor="settings-language" className="block text-sm font-medium text-zinc-400 mb-2">
+            <label
+              htmlFor="settings-language"
+              className="block text-sm font-medium text-zinc-400 mb-2"
+            >
               {t("settings.language")}
             </label>
             <select
@@ -41,7 +45,10 @@ export function SettingsDefaultsSection({
             </select>
           </div>
           <div>
-            <label htmlFor="settings-max-retries" className="block text-sm font-medium text-zinc-400 mb-2">
+            <label
+              htmlFor="settings-max-retries"
+              className="block text-sm font-medium text-zinc-400 mb-2"
+            >
               {t("settings.maxRetries")}
             </label>
             <input
@@ -58,14 +65,19 @@ export function SettingsDefaultsSection({
           </div>
         </div>
         <div>
-          <label htmlFor="settings-download-dir" className="block text-sm font-medium text-zinc-400 mb-2">
+          <label
+            htmlFor="settings-download-dir"
+            className="block text-sm font-medium text-zinc-400 mb-2"
+          >
             {t("settings.downloadDir")}
           </label>
           <div className="flex gap-2">
             <input
               id="settings-download-dir"
-              className="w-full bg-zinc-950 border border-zinc-800 text-zinc-300 rounded-xl px-4 py-3 focus:outline-none"
+              className="w-full bg-zinc-950 border border-zinc-800 text-zinc-300 rounded-xl px-4 py-3 focus:outline-none font-mono text-sm"
               disabled={isLoading}
+              value={downloadDir}
+              readOnly
               {...register("downloadDir")}
             />
             <button

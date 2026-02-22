@@ -80,3 +80,20 @@ export interface StorageStats {
   usedPercent: number;
   downloadDirBytes: number;
 }
+
+export type DependencyBootstrapPhase =
+  | "idle"
+  | "preparing"
+  | "checking_yt_dlp"
+  | "downloading_yt_dlp"
+  | "checking_ffmpeg"
+  | "installing_ffmpeg"
+  | "ready"
+  | "failed";
+
+export interface DependencyBootstrapStatus {
+  inProgress: boolean;
+  phase: DependencyBootstrapPhase;
+  progressPercent: number | null;
+  errorMessage?: string;
+}

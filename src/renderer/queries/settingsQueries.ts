@@ -16,5 +16,6 @@ export const settingsQueryOptions = {
     queryOptions({
       ...settingsQueries.current,
       staleTime: FIVE_MINUTES_MS,
+      refetchOnMount: "always",
     }),
 };

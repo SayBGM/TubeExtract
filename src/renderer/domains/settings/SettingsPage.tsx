@@ -19,7 +19,7 @@ import { SettingsUpdateSection } from "./components/SettingsUpdateSection";
 
 const EMPTY_SETTINGS: AppSettings = {
   downloadDir: "",
-  maxRetries: 0,
+  maxRetries: 3,
   language: "ko",
 };
 
@@ -119,7 +119,9 @@ export function SettingsPage() {
 
   return (
     <section className="max-w-4xl mx-auto pt-10">
-      <h1 className="text-3xl font-bold text-white mb-8">{t("settings.title")}</h1>
+      <h1 className="text-3xl font-bold text-white mb-8">
+        {t("settings.title")}
+      </h1>
 
       <FormProvider {...settingsForm}>
         <form className="space-y-6" onSubmit={onSubmit}>

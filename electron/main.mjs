@@ -4,7 +4,6 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { pipeline } from "node:stream/promises";
 import https from "node:https";
 import checkDiskSpace from "check-disk-space";
 import ffmpegStatic from "ffmpeg-static";
@@ -27,12 +26,23 @@ const COMMON_BINARY_DIRS = [
 const MAX_LOG_LINES_PER_JOB = 120;
 const ANALYZE_TIMEOUT_MS = 15_000;
 const RETRY_DELAY_TABLE_MS = [2000, 5000, 10000, 15000];
+const DIAGNOSTICS_DEPENDENCY_WAIT_MS = 1200;
+const DIAGNOSTICS_COMMAND_TIMEOUT_MS = 4000;
+const YTDLP_LATEST_API_URL = "https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest";
+const YTDLP_VERSION_CHECK_TIMEOUT_MS = 5000;
 const YTDLP_DOWNLOAD_URL_WINDOWS = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe";
-const YTDLP_DOWNLOAD_URL_MACOS = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp";
+const YTDLP_DOWNLOAD_URL_MACOS = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos";
 const MAX_BASE_FILENAME_LENGTH = 160;
 
 let mainWindow = null;
 let dependencyInstallPromise = null;
+let dependenciesReady = false;
+const dependencyBootstrapState = {
+  inProgress: false,
+  phase: "idle",
+  progressPercent: null,
+  errorMessage: undefined,
+};
 const state = {
   queue: {
     items: [],
@@ -86,6 +96,22 @@ function emitQueueUpdated() {
   mainWindow.webContents.send("queue-updated", queueSnapshot());
 }
 
+function dependencyBootstrapSnapshot() {
+  return {
+    ...dependencyBootstrapState,
+  };
+}
+
+function emitDependencyBootstrapUpdated() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  mainWindow.webContents.send("dependency-bootstrap-updated", dependencyBootstrapSnapshot());
+}
+
+function setDependencyBootstrapState(next) {
+  Object.assign(dependencyBootstrapState, next);
+  emitDependencyBootstrapUpdated();
+}
+
 function persistQueue() {
   fs.writeFileSync(queueFilePath(), JSON.stringify(state.queue.items, null, 2), "utf-8");
 }
@@ -99,6 +125,7 @@ function loadSettings() {
   if (!fs.existsSync(file)) return;
   const parsed = JSON.parse(fs.readFileSync(file, "utf-8"));
   state.settings = { ...state.settings, ...parsed };
+  state.settings.downloadDir = normalizeDownloadDir(state.settings.downloadDir);
 }
 
 function loadQueue() {
@@ -119,6 +146,24 @@ function getDefaultSettings() {
     maxRetries: 3,
     language: "ko",
   };
+}
+
+function normalizeDownloadDir(rawPath) {
+  const raw = String(rawPath ?? "").trim();
+  if (!raw) {
+    return app.getPath("downloads");
+  }
+
+  if (path.isAbsolute(raw)) {
+    return raw;
+  }
+
+  // Recover common malformed macOS path persisted without leading "/".
+  if (process.platform !== "win32" && raw.startsWith("Users/")) {
+    return `/${raw}`;
+  }
+
+  return raw;
 }
 
 function resolveExecutable(binaryName) {
@@ -145,12 +190,12 @@ function resolveExecutable(binaryName) {
   return withExt;
 }
 
-function downloadFile(url, destinationPath) {
+function downloadFile(url, destinationPath, onProgress) {
   return new Promise((resolve, reject) => {
     const request = https.get(url, (response) => {
       if (response.statusCode && response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
         response.resume();
-        downloadFile(response.headers.location, destinationPath).then(resolve).catch(reject);
+        downloadFile(response.headers.location, destinationPath, onProgress).then(resolve).catch(reject);
         return;
       }
 
@@ -161,19 +206,151 @@ function downloadFile(url, destinationPath) {
       }
 
       const fileStream = fs.createWriteStream(destinationPath);
-      pipeline(response, fileStream).then(resolve).catch(reject);
+      const totalBytesRaw = Number.parseInt(String(response.headers["content-length"] ?? ""), 10);
+      const totalBytes = Number.isFinite(totalBytesRaw) && totalBytesRaw > 0 ? totalBytesRaw : undefined;
+      let downloadedBytes = 0;
+
+      response.on("data", (chunk) => {
+        downloadedBytes += chunk.length;
+        onProgress?.({ downloadedBytes, totalBytes });
+      });
+
+      response.on("error", reject);
+      fileStream.on("error", reject);
+      fileStream.on("finish", resolve);
+      response.pipe(fileStream);
     });
 
     request.on("error", reject);
   });
 }
 
-async function ensureYtDlp() {
+function fetchJson(url, timeoutMs = 5000) {
+  return new Promise((resolve, reject) => {
+    const request = https.request(
+      url,
+      {
+        method: "GET",
+        headers: {
+          Accept: "application/vnd.github+json",
+          "User-Agent": "TubeExtract",
+        },
+      },
+      (response) => {
+        if (response.statusCode !== 200) {
+          response.resume();
+          reject(new Error(`요청 실패: ${response.statusCode ?? "unknown"}`));
+          return;
+        }
+
+        let body = "";
+        response.setEncoding("utf8");
+        response.on("data", (chunk) => {
+          body += chunk;
+        });
+        response.on("end", () => {
+          try {
+            resolve(JSON.parse(body));
+          } catch (error) {
+            reject(error);
+          }
+        });
+      },
+    );
+
+    request.setTimeout(timeoutMs, () => {
+      request.destroy(new Error("요청 타임아웃"));
+    });
+
+    request.on("error", reject);
+    request.end();
+  });
+}
+
+function normalizeYtDlpVersion(input) {
+  return String(input ?? "").trim().replace(/^v/i, "");
+}
+
+async function getInstalledYtDlpVersion(targetPath) {
+  const check = await runCommandCapture(targetPath, ["--version"], YTDLP_VERSION_CHECK_TIMEOUT_MS);
+  if (check.code !== 0) {
+    return null;
+  }
+  const version = normalizeYtDlpVersion(check.stdout);
+  return version || null;
+}
+
+async function getLatestYtDlpVersion() {
+  try {
+    const payload = await fetchJson(YTDLP_LATEST_API_URL, YTDLP_VERSION_CHECK_TIMEOUT_MS);
+    const tagName = payload && typeof payload === "object" ? payload.tag_name : "";
+    const version = normalizeYtDlpVersion(tagName);
+    return version || null;
+  } catch {
+    return null;
+  }
+}
+
+async function ensureYtDlp(options = {}) {
+  const { checkLatest = false } = options;
   const target = managedExecutablePath("yt-dlp");
-  if (fs.existsSync(target)) return;
+  setDependencyBootstrapState({
+    inProgress: true,
+    phase: "checking_yt_dlp",
+    progressPercent: 15,
+    errorMessage: undefined,
+  });
+
+  if (fs.existsSync(target)) {
+    if (!checkLatest) {
+      return;
+    }
+
+    const installedVersion = await getInstalledYtDlpVersion(target);
+    if (!installedVersion) {
+      // Replace stale/broken yt-dlp binaries (e.g. Python-dependent script on older macOS).
+      await fs.promises.rm(target, { force: true });
+    } else {
+      const latestVersion = await getLatestYtDlpVersion();
+      // If network check fails, keep the installed binary and avoid blocking user actions.
+      if (!latestVersion || latestVersion === installedVersion) {
+        return;
+      }
+      await fs.promises.rm(target, { force: true });
+    }
+  }
 
   const downloadUrl = process.platform === "win32" ? YTDLP_DOWNLOAD_URL_WINDOWS : YTDLP_DOWNLOAD_URL_MACOS;
-  await downloadFile(downloadUrl, target);
+  setDependencyBootstrapState({
+    inProgress: true,
+    phase: "downloading_yt_dlp",
+    progressPercent: null,
+    errorMessage: undefined,
+  });
+  await downloadFile(downloadUrl, target, ({ downloadedBytes, totalBytes }) => {
+    if (!totalBytes) {
+      setDependencyBootstrapState({
+        inProgress: true,
+        phase: "downloading_yt_dlp",
+        progressPercent: null,
+        errorMessage: undefined,
+      });
+      return;
+    }
+    const ratio = Math.max(0, Math.min(1, downloadedBytes / totalBytes));
+    setDependencyBootstrapState({
+      inProgress: true,
+      phase: "downloading_yt_dlp",
+      progressPercent: Math.round(20 + ratio * 60),
+      errorMessage: undefined,
+    });
+  });
+  setDependencyBootstrapState({
+    inProgress: true,
+    phase: "checking_ffmpeg",
+    progressPercent: 82,
+    errorMessage: undefined,
+  });
   if (process.platform !== "win32") {
     fs.chmodSync(target, 0o755);
   }
@@ -181,12 +358,24 @@ async function ensureYtDlp() {
 
 async function ensureFfmpeg() {
   const target = managedExecutablePath("ffmpeg");
+  setDependencyBootstrapState({
+    inProgress: true,
+    phase: "checking_ffmpeg",
+    progressPercent: 86,
+    errorMessage: undefined,
+  });
   if (fs.existsSync(target)) return;
 
   if (!ffmpegStatic) {
     throw new Error("ffmpeg-static 바이너리를 찾을 수 없습니다.");
   }
 
+  setDependencyBootstrapState({
+    inProgress: true,
+    phase: "installing_ffmpeg",
+    progressPercent: 92,
+    errorMessage: undefined,
+  });
   fs.copyFileSync(ffmpegStatic, target);
   if (process.platform !== "win32") {
     fs.chmodSync(target, 0o755);
@@ -194,18 +383,43 @@ async function ensureFfmpeg() {
 }
 
 async function ensureDependencies() {
+  if (dependenciesReady) {
+    return;
+  }
+
   if (dependencyInstallPromise) {
     return dependencyInstallPromise;
   }
 
   dependencyInstallPromise = (async () => {
+    setDependencyBootstrapState({
+      inProgress: true,
+      phase: "preparing",
+      progressPercent: 5,
+      errorMessage: undefined,
+    });
     fs.mkdirSync(managedBinDirPath(), { recursive: true });
-    await ensureYtDlp();
+    await ensureYtDlp({ checkLatest: true });
     await ensureFfmpeg();
+    dependenciesReady = true;
+    setDependencyBootstrapState({
+      inProgress: false,
+      phase: "ready",
+      progressPercent: 100,
+      errorMessage: undefined,
+    });
   })();
 
   try {
     await dependencyInstallPromise;
+  } catch (error) {
+    setDependencyBootstrapState({
+      inProgress: false,
+      phase: "failed",
+      progressPercent: null,
+      errorMessage: error instanceof Error ? error.message : "Dependency bootstrap failed.",
+    });
+    throw error;
   } finally {
     dependencyInstallPromise = null;
   }
@@ -759,6 +973,10 @@ function getSettings() {
   return { ...state.settings };
 }
 
+function getDependencyBootstrapStatus() {
+  return dependencyBootstrapSnapshot();
+}
+
 async function pickDownloadDir() {
   const result = await dialog.showOpenDialog(mainWindow, {
     title: "다운로드 폴더 선택",
@@ -772,20 +990,23 @@ async function pickDownloadDir() {
 }
 
 function setSettings(nextSettings) {
-  state.settings = { ...state.settings, ...nextSettings };
+  state.settings = {
+    ...state.settings,
+    ...nextSettings,
+    downloadDir: normalizeDownloadDir(nextSettings.downloadDir),
+  };
   persistSettings();
 }
 
 async function runDiagnostics() {
-  try {
-    await ensureDependencies();
-  } catch {
-    // Diagnostics should still run even if installation failed.
-  }
+  // Keep diagnostics responsive: warm up dependencies briefly, then proceed.
+  await Promise.race([ensureDependencies(), sleep(DIAGNOSTICS_DEPENDENCY_WAIT_MS)]).catch(() => {});
   const ytDlp = resolveExecutable("yt-dlp");
   const ffmpeg = resolveExecutable("ffmpeg");
-  const ytDlpCheck = await runCommandCapture(ytDlp, ["--version"]).catch(() => ({ code: 1 }));
-  const ffmpegCheck = await runCommandCapture(ffmpeg, ["-version"]).catch(() => ({ code: 1 }));
+  const [ytDlpCheck, ffmpegCheck] = await Promise.all([
+    runCommandCapture(ytDlp, ["--version"], DIAGNOSTICS_COMMAND_TIMEOUT_MS).catch(() => ({ code: 1 })),
+    runCommandCapture(ffmpeg, ["-version"], DIAGNOSTICS_COMMAND_TIMEOUT_MS).catch(() => ({ code: 1 })),
+  ]);
   let writable = false;
   try {
     fs.mkdirSync(state.settings.downloadDir, { recursive: true });
@@ -913,6 +1134,7 @@ function registerIpcHandlers() {
   ipcMain.handle("clear_terminal_jobs", () => clearTerminalJobs());
   ipcMain.handle("get_queue_snapshot", () => getQueueSnapshot());
   ipcMain.handle("get_settings", () => getSettings());
+  ipcMain.handle("get_dependency_bootstrap_status", () => getDependencyBootstrapStatus());
   ipcMain.handle("pick_download_dir", () => pickDownloadDir());
   ipcMain.handle("set_settings", (_event, args) => setSettings(args.settings));
   ipcMain.handle("run_diagnostics", () => runDiagnostics());
@@ -1008,6 +1230,10 @@ function createWindow() {
     ]);
     menu.popup({ window: mainWindow });
   });
+
+  mainWindow.webContents.on("did-finish-load", () => {
+    emitDependencyBootstrapUpdated();
+  });
 }
 
 app.whenReady().then(() => {
@@ -1017,6 +1243,7 @@ app.whenReady().then(() => {
   void cleanupTemporaryDownloads().catch(console.error);
   registerIpcHandlers();
   createWindow();
+  // Warm-up once on startup. Later downloads/diagnostics reuse resolved binaries.
   void ensureDependencies().catch(console.error);
   emitQueueUpdated();
   tryStartNextJob();

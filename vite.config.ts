@@ -4,6 +4,8 @@ import tailwindcss from "@tailwindcss/vite";
 
 export default defineConfig({
   clearScreen: false,
+  // Use relative asset paths so packaged Electron file:// loading works.
+  base: "./",
   plugins: [
     react({
       babel: {

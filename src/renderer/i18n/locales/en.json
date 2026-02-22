@@ -72,5 +72,20 @@
       "latest": "Already up to date.",
       "available": "New version {{version}} is available."
     }
+  },
+  "bootstrap": {
+    "title": "Preparing required components",
+    "subtitle": "On first launch, yt-dlp / ffmpeg are installed or verified.",
+    "progressUnknown": "Calculating progress...",
+    "steps": {
+      "idle": "Idle",
+      "preparing": "Preparing installation",
+      "checkingYtDlp": "Checking yt-dlp",
+      "downloadingYtDlp": "Downloading yt-dlp",
+      "checkingFfmpeg": "Checking ffmpeg",
+      "installingFfmpeg": "Installing ffmpeg",
+      "ready": "Ready",
+      "failed": "Failed"
+    }
   }
 }

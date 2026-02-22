@@ -1,6 +1,7 @@
 import type {
   AnalysisResult,
   AppSettings,
+  DependencyBootstrapStatus,
   DiagnosticsResult,
   DownloadMode,
   DuplicateCheckResult,
@@ -50,6 +51,7 @@ export const ELECTRON_CHANNEL = {
   RUN_DIAGNOSTICS: "run_diagnostics",
   CHECK_UPDATE: "check_update",
   GET_STORAGE_STATS: "get_storage_stats",
+  GET_DEPENDENCY_BOOTSTRAP_STATUS: "get_dependency_bootstrap_status",
 } as const;
 
 type DesktopCommandName = (typeof ELECTRON_CHANNEL)[keyof typeof ELECTRON_CHANNEL];
@@ -237,7 +239,26 @@ export async function getStorageStats(): Promise<StorageStats> {
   return invokeCommand(ELECTRON_CHANNEL.GET_STORAGE_STATS);
 }
 
+export async function getDependencyBootstrapStatus(): Promise<DependencyBootstrapStatus> {
+  if (shouldUseMockMode()) {
+    return {
+      inProgress: false,
+      phase: "ready",
+      progressPercent: 100,
+      errorMessage: undefined,
+    };
+  }
+  return invokeCommand(ELECTRON_CHANNEL.GET_DEPENDENCY_BOOTSTRAP_STATUS);
+}
+
 export function onQueueUpdated(listener: (snapshot: QueueSnapshot) => void): (() => void) | undefined {
   if (shouldUseMockMode()) return undefined;
   return window.electronAPI?.onQueueUpdated(listener);
+}
+
+export function onDependencyBootstrapUpdated(
+  listener: (status: DependencyBootstrapStatus) => void,
+): (() => void) | undefined {
+  if (shouldUseMockMode()) return undefined;
+  return window.electronAPI?.onDependencyBootstrapUpdated(listener);
 }
