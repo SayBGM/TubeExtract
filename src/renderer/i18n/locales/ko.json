@@ -1,0 +1,77 @@
+{
+  "common": {
+    "cancel": "취소",
+    "unknownError": "알 수 없는 오류가 발생했습니다."
+  },
+  "sidebar": {
+    "setup": "다운로드",
+    "queue": "대기열",
+    "settings": "설정",
+    "storage": "저장공간",
+    "loading": "불러오는 중...",
+    "storageUsedOf": "{{used}} 사용 / 전체 {{total}}",
+    "downloads": "다운로드: {{size}}"
+  },
+  "setup": {
+    "title": "다운로드 설정",
+    "subtitle": "유튜브 링크를 붙여넣고 원하는 형식과 화질로 다운로드하세요.",
+    "urlPlaceholder": "유튜브 URL을 입력하세요",
+    "format": "형식",
+    "videoQuality": "화질",
+    "audioQuality": "음질",
+    "video": "영상",
+    "audio": "오디오",
+    "duration": "영상 길이: {{seconds}}초",
+    "errors": {
+      "emptyUrl": "URL을 먼저 입력해 주세요.",
+      "invalidUrl": "유효한 유튜브 링크를 입력해 주세요.",
+      "selectQuality": "품질을 선택해 주세요."
+    },
+    "actions": {
+      "analyze": "링크 분석",
+      "analyzing": "분석 중...",
+      "downloadNow": "즉시 다운로드",
+      "addToQueue": "대기열에 추가"
+    },
+    "duplicate": {
+      "title": "중복 다운로드 감지",
+      "description": "같은 URL/품질 파일이 이미 존재합니다.",
+      "forceSave": "그대로 저장",
+      "openFolder": "저장폴더 열기"
+    },
+    "toast": {
+      "addedToQueue": "대기열에 추가되었습니다."
+    }
+  },
+  "queue": {
+    "activeCount": "진행 중",
+    "completedCount": "완료",
+    "activeList": "진행 리스트",
+    "completedList": "완료 리스트",
+    "clearCompleted": "완료 리스트 비우기",
+    "clearCompletedConfirm": "완료 항목을 목록에서 지울까요?",
+    "readyToView": "파일 확인 가능",
+    "noActiveDownloads": "진행 중인 다운로드가 없습니다.",
+    "noDownloadHistory": "다운로드 이력이 없습니다.",
+    "downloadFailed": "다운로드 실패",
+    "liveLogs": "실시간 로그",
+    "noLogsYet": "아직 로그가 없습니다."
+  },
+  "settings": {
+    "title": "설정",
+    "downloadDir": "다운로드 경로",
+    "pickFolder": "폴더 선택",
+    "maxRetries": "최대 재시도 횟수",
+    "language": "언어",
+    "save": "저장",
+    "downloadDefaults": "다운로드 기본값",
+    "diagnostics": "환경 진단",
+    "runDiagnostics": "진단 실행",
+    "update": {
+      "title": "업데이트",
+      "check": "업데이트 확인",
+      "latest": "최신 버전입니다.",
+      "available": "새 버전 {{version}} 이(가) 있습니다."
+    }
+  }
+}

@@ -1,0 +1,14 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+:root {
+  font-family: Inter, "Noto Sans KR", system-ui, sans-serif;
+}
+
+body {
+  margin: 0;
+}
+
+.animate-spin-slow {
+  animation: spin 12s linear infinite;
+}

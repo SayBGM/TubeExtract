@@ -1,0 +1,45 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.platform }}
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+      uses: actions/setup-node@v4
+      with:
+        node-version: 20
+        cache: npm
+
+      - name: Install frontend dependencies
+      run: npm ci
+
+      - name: Build desktop app
+        run: npm run electron:build
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: TubeExtract ${{ github.ref_name }}
+          body: Automated Electron release from GitHub Actions.
+          draft: false
+          prerelease: false
+          files: |
+            release/*.dmg
+            release/*.zip
+            release/*.exe
+            release/*.blockmap
+            release/latest*.yml

@@ -1,0 +1,77 @@
+{
+  "common": {
+    "cancel": "Cancel",
+    "unknownError": "Unknown error."
+  },
+  "sidebar": {
+    "setup": "Setup",
+    "queue": "Queue",
+    "settings": "Settings",
+    "storage": "Storage",
+    "loading": "Loading...",
+    "storageUsedOf": "{{used}} used of {{total}}",
+    "downloads": "Downloads: {{size}}"
+  },
+  "setup": {
+    "title": "Download Setup",
+    "subtitle": "Paste a YouTube link and download in your preferred format and quality.",
+    "urlPlaceholder": "Paste YouTube URL",
+    "format": "Format",
+    "videoQuality": "Video Quality",
+    "audioQuality": "Audio Quality",
+    "video": "Video",
+    "audio": "Audio",
+    "duration": "Duration: {{seconds}} sec",
+    "errors": {
+      "emptyUrl": "Please enter URL first.",
+      "invalidUrl": "Please enter a valid YouTube URL.",
+      "selectQuality": "Please select quality."
+    },
+    "actions": {
+      "analyze": "Analyze URL",
+      "analyzing": "Analyzing...",
+      "downloadNow": "Download Now",
+      "addToQueue": "Add to Queue"
+    },
+    "duplicate": {
+      "title": "Duplicate Download Detected",
+      "description": "The same URL/quality was found.",
+      "forceSave": "Save Anyway",
+      "openFolder": "Open Folder"
+    },
+    "toast": {
+      "addedToQueue": "Added to queue."
+    }
+  },
+  "queue": {
+    "activeCount": "Active",
+    "completedCount": "Completed",
+    "activeList": "Active Jobs",
+    "completedList": "Completed Jobs",
+    "clearCompleted": "Clear History",
+    "clearCompletedConfirm": "Clear completed items from list?",
+    "readyToView": "Ready to view",
+    "noActiveDownloads": "No active downloads",
+    "noDownloadHistory": "No download history",
+    "downloadFailed": "Download failed",
+    "liveLogs": "Live Logs",
+    "noLogsYet": "No logs yet."
+  },
+  "settings": {
+    "title": "Settings",
+    "downloadDir": "Download Directory",
+    "pickFolder": "Browse",
+    "maxRetries": "Max Retries",
+    "language": "Language",
+    "save": "Save",
+    "downloadDefaults": "Download Defaults",
+    "diagnostics": "Diagnostics",
+    "runDiagnostics": "Run Diagnostics",
+    "update": {
+      "title": "Update",
+      "check": "Check Update",
+      "latest": "Already up to date.",
+      "available": "New version {{version}} is available."
+    }
+  }
+}
