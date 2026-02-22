@@ -26,6 +26,12 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      - name: Apply version from tag
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          npm version "$VERSION" --no-git-tag-version
+
       - name: Run unit tests
         run: npm run test
 
