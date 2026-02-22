@@ -1,6 +1,13 @@
 import { Download, FolderOpen } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import { useFormContext, useWatch } from "react-hook-form";
+import { Controller, useFormContext, useWatch } from "react-hook-form";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "../../../components/ui/select";
 import type { AppSettings } from "../../../types";
 
 interface SettingsDefaultsSectionProps {
@@ -33,16 +40,21 @@ export function SettingsDefaultsSection({
             >
               {t("settings.language")}
             </label>
-            <select
-              id="settings-language"
-              data-testid="settings-language-select"
-              className="w-full bg-zinc-950 border border-zinc-800 text-white rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-blue-500/50"
-              disabled={isLoading}
-              {...register("language")}
-            >
-              <option value="ko">한국어</option>
-              <option value="en">English</option>
-            </select>
+            <Controller
+              name="language"
+              control={control}
+              render={({ field }) => (
+                <Select value={field.value} onValueChange={field.onChange} disabled={isLoading}>
+                  <SelectTrigger id="settings-language" data-testid="settings-language-select">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="ko">한국어</SelectItem>
+                    <SelectItem value="en">English</SelectItem>
+                  </SelectContent>
+                </Select>
+              )}
+            />
           </div>
           <div>
             <label

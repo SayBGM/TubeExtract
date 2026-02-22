@@ -26,8 +26,7 @@ const COMMON_BINARY_DIRS = [
 const MAX_LOG_LINES_PER_JOB = 120;
 const ANALYZE_TIMEOUT_MS = 15_000;
 const RETRY_DELAY_TABLE_MS = [2000, 5000, 10000, 15000];
-const DIAGNOSTICS_DEPENDENCY_WAIT_MS = 1200;
-const DIAGNOSTICS_COMMAND_TIMEOUT_MS = 4000;
+const DIAGNOSTICS_COMMAND_TIMEOUT_MS = 10000;
 const YTDLP_LATEST_API_URL = "https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest";
 const YTDLP_VERSION_CHECK_TIMEOUT_MS = 5000;
 const YTDLP_DOWNLOAD_URL_WINDOWS = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe";
@@ -999,14 +998,31 @@ function setSettings(nextSettings) {
 }
 
 async function runDiagnostics() {
-  // Keep diagnostics responsive: warm up dependencies briefly, then proceed.
-  await Promise.race([ensureDependencies(), sleep(DIAGNOSTICS_DEPENDENCY_WAIT_MS)]).catch(() => {});
+  let dependencyErrorMessage;
+  try {
+    // Diagnostics should reflect real readiness, so wait until dependency bootstrap finishes.
+    await ensureDependencies();
+  } catch (error) {
+    dependencyErrorMessage = error instanceof Error ? error.message : "dependency bootstrap failed";
+  }
   const ytDlp = resolveExecutable("yt-dlp");
   const ffmpeg = resolveExecutable("ffmpeg");
   const [ytDlpCheck, ffmpegCheck] = await Promise.all([
     runCommandCapture(ytDlp, ["--version"], DIAGNOSTICS_COMMAND_TIMEOUT_MS).catch(() => ({ code: 1 })),
     runCommandCapture(ffmpeg, ["-version"], DIAGNOSTICS_COMMAND_TIMEOUT_MS).catch(() => ({ code: 1 })),
   ]);
+  const ytDlpAvailable = ytDlpCheck.code === 0;
+  const ffmpegAvailable = ffmpegCheck.code === 0;
+  const ytDlpReason = ytDlpAvailable
+    ? ""
+    : ytDlpCheck.timedOut
+      ? "timeout"
+      : String(ytDlpCheck.stderr ?? "").trim().slice(0, 120) || `exit:${ytDlpCheck.code}`;
+  const ffmpegReason = ffmpegAvailable
+    ? ""
+    : ffmpegCheck.timedOut
+      ? "timeout"
+      : String(ffmpegCheck.stderr ?? "").trim().slice(0, 120) || `exit:${ffmpegCheck.code}`;
   let writable = false;
   try {
     fs.mkdirSync(state.settings.downloadDir, { recursive: true });
@@ -1018,10 +1034,10 @@ async function runDiagnostics() {
     writable = false;
   }
   return {
-    ytDlpAvailable: ytDlpCheck.code === 0,
-    ffmpegAvailable: ffmpegCheck.code === 0,
+    ytDlpAvailable,
+    ffmpegAvailable,
     downloadPathWritable: writable,
-    message: `yt-dlp: ${ytDlpCheck.code === 0 ? "OK" : "FAIL"} (${ytDlp}), ffmpeg: ${ffmpegCheck.code === 0 ? "OK" : "FAIL"} (${ffmpeg}), download-dir writable: ${writable ? "OK" : "FAIL"}`,
+    message: `yt-dlp: ${ytDlpAvailable ? "OK" : "FAIL"} (${ytDlp}${ytDlpReason ? `, reason: ${ytDlpReason}` : ""}), ffmpeg: ${ffmpegAvailable ? "OK" : "FAIL"} (${ffmpeg}${ffmpegReason ? `, reason: ${ffmpegReason}` : ""}), download-dir writable: ${writable ? "OK" : "FAIL"}${dependencyErrorMessage ? `, bootstrap: ${dependencyErrorMessage}` : ""}`,
   };
 }
 

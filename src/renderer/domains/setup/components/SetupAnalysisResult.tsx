@@ -3,6 +3,13 @@ import { Clock, Download, Monitor, Music, PlayCircle, Video } from "lucide-react
 import { useTranslation } from "react-i18next";
 import type { AnalysisResult } from "../../../types";
 import { cn } from "../../../lib/cn";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "../../../components/ui/select";
 
 interface SetupAnalysisResultProps {
   analysisResult: AnalysisResult;
@@ -111,17 +118,18 @@ export function SetupAnalysisResult({
                 </label>
                 <div className="relative">
                   <Monitor className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-zinc-500" />
-                  <select
-                    className="w-full bg-zinc-950 border border-zinc-800 text-white text-sm rounded-xl pl-10 pr-4 py-3 focus:outline-none focus:ring-2 focus:ring-blue-500/50 appearance-none"
-                    value={selectedQualityId}
-                    onChange={(e) => onSelectQuality(e.target.value)}
-                  >
-                    {qualityOptions.map((quality) => (
-                      <option key={quality.id} value={quality.id}>
-                        {quality.label}
-                      </option>
-                    ))}
-                  </select>
+                  <Select value={selectedQualityId} onValueChange={onSelectQuality}>
+                    <SelectTrigger className="pl-10">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {qualityOptions.map((quality) => (
+                        <SelectItem key={quality.id} value={quality.id}>
+                          {quality.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
                 </div>
               </div>
             </div>
