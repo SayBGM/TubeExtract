@@ -8,7 +8,7 @@
     "dev": "vite --port 1420",
     "electron:dev": "concurrently -k \"npm run dev\" \"wait-on tcp:1420 && electron .\"",
     "build": "tsc -b && vite build",
-    "electron:build": "npm run build && electron-builder",
+    "electron:build": "npm run build && electron-builder --publish never",
     "lint": "eslint .",
     "test": "vitest run",
     "test:watch": "vitest",
