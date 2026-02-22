@@ -845,15 +845,6 @@ async function checkUpdate() {
 async function deleteFile(filePath) {
   if (!filePath) return;
 
-  try {
-    await fs.promises.unlink(filePath);
-  } catch (error) {
-    const isNotFound = error && typeof error === "object" && "code" in error && error.code === "ENOENT";
-    if (!isNotFound) {
-      throw error;
-    }
-  }
-
   state.queue.items = state.queue.items.filter((item) => item.outputPath !== filePath);
   persistQueue();
   emitQueueUpdated();

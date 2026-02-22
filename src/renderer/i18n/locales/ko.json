@@ -30,8 +30,7 @@
     "actions": {
       "analyze": "링크 분석",
       "analyzing": "분석 중...",
-      "downloadNow": "즉시 다운로드",
-      "addToQueue": "대기열에 추가"
+      "downloadNow": "즉시 다운로드"
     },
     "duplicate": {
       "title": "중복 다운로드 감지",
@@ -53,7 +52,6 @@
     "readyToView": "파일 확인 가능",
     "noActiveDownloads": "진행 중인 다운로드가 없습니다.",
     "noDownloadHistory": "다운로드 이력이 없습니다.",
-    "downloadFailed": "다운로드 실패",
     "liveLogs": "실시간 로그",
     "noLogsYet": "아직 로그가 없습니다."
   },
@@ -64,6 +62,7 @@
     "maxRetries": "최대 재시도 횟수",
     "language": "언어",
     "save": "저장",
+    "saved": "설정이 저장되었습니다.",
     "downloadDefaults": "다운로드 기본값",
     "diagnostics": "환경 진단",
     "runDiagnostics": "진단 실행",

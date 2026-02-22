@@ -1,3 +1,5 @@
+import { useEffect, useId, useRef } from "react";
+
 interface ConfirmModalProps {
   title: string;
   description: string;
@@ -23,13 +25,45 @@ export function ConfirmModal({
   onCancel,
   secondaryAction,
 }: ConfirmModalProps) {
+  const confirmButtonRef = useRef<HTMLButtonElement>(null);
+  const titleId = useId();
+  const descriptionId = useId();
+
+  useEffect(() => {
+    if (!isOpen) return;
+    confirmButtonRef.current?.focus();
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onCancel();
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [isOpen, onCancel]);
+
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-50 grid place-items-center bg-black/70 p-4">
-      <div className="w-full max-w-md rounded-xl border border-zinc-700 bg-zinc-900 p-5 text-white shadow-2xl">
-        <h3 className="text-lg font-semibold">{title}</h3>
-        <p className="mt-2 text-sm text-zinc-300">{description}</p>
+    <div
+      className="fixed inset-0 z-50 grid place-items-center bg-black/70 p-4"
+      role="presentation"
+      onClick={onCancel}
+    >
+      <div
+        className="w-full max-w-md rounded-xl border border-zinc-700 bg-zinc-900 p-5 text-white shadow-2xl"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        aria-describedby={descriptionId}
+        onClick={(event) => event.stopPropagation()}
+      >
+        <h3 id={titleId} className="text-lg font-semibold">{title}</h3>
+        <p id={descriptionId} className="mt-2 text-sm text-zinc-300">{description}</p>
         <div className="mt-5 flex flex-wrap justify-end gap-2">
           <button
             type="button"
@@ -51,6 +85,7 @@ export function ConfirmModal({
           <button
             type="button"
             onClick={onConfirm}
+            ref={confirmButtonRef}
             className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white hover:bg-blue-500 transition-colors"
           >
             {confirmText}

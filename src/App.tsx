@@ -5,9 +5,11 @@ import { SetupPage } from "./renderer/domains/setup/SetupPage";
 import { QueuePage } from "./renderer/domains/queue/QueuePage";
 import { SettingsPage } from "./renderer/domains/settings/SettingsPage";
 import { useQueueEvents } from "./renderer/hooks/useQueueEvents";
+import { useToastBridge } from "./renderer/hooks/useToastBridge";
 
 function App() {
   useQueueEvents();
+  useToastBridge();
 
   return (
     <div className="flex min-h-screen bg-zinc-950 text-white font-sans antialiased overflow-hidden">

@@ -2,6 +2,8 @@ import { useEffect } from "react";
 import { getQueueSnapshot, isNativeDesktop, onQueueUpdated } from "../lib/electronClient";
 import { useQueueStore } from "../store/queueStore";
 
+const QUEUE_POLLING_INTERVAL_MS = 1000;
+
 export function useQueueEvents() {
   const applyQueueSnapshot = useQueueStore((state) => state.applyQueueSnapshot);
 
@@ -22,7 +24,7 @@ export function useQueueEvents() {
           getQueueSnapshot()
             .then((snapshot) => applyQueueSnapshot(snapshot.items))
             .catch(console.error);
-        }, 1000);
+        }, QUEUE_POLLING_INTERVAL_MS);
       }
     };
 

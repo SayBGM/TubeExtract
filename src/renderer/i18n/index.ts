@@ -2,13 +2,17 @@ import i18n from "i18next";
 import { initReactI18next } from "react-i18next";
 import ko from "./locales/ko.json";
 import en from "./locales/en.json";
+import { SUPPORTED_LANGUAGES, type AppLanguage } from "../types";
 
-const DEFAULT_LANGUAGE = "ko";
-const SUPPORTED_LANGUAGES = ["ko", "en"] as const;
+const DEFAULT_LANGUAGE: AppLanguage = "ko";
+
+function isSupportedLanguage(language: string): language is AppLanguage {
+  return SUPPORTED_LANGUAGES.includes(language as AppLanguage);
+}
 
 function resolveInitialLanguage() {
   const browserLanguage = navigator.language.slice(0, 2).toLowerCase();
-  if (SUPPORTED_LANGUAGES.includes(browserLanguage as (typeof SUPPORTED_LANGUAGES)[number])) {
+  if (isSupportedLanguage(browserLanguage)) {
     return browserLanguage;
   }
   return DEFAULT_LANGUAGE;

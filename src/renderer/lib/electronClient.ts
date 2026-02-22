@@ -149,7 +149,7 @@ export async function clearTerminalJobs(): Promise<void> {
   if (shouldUseMockMode()) {
     for (let index = mockQueue.length - 1; index >= 0; index -= 1) {
       const status = mockQueue[index].status;
-      if (status === "completed" || status === "failed" || status === "canceled") {
+      if (status === "completed") {
         mockQueue.splice(index, 1);
       }
     }

@@ -30,8 +30,7 @@
     "actions": {
       "analyze": "Analyze URL",
       "analyzing": "Analyzing...",
-      "downloadNow": "Download Now",
-      "addToQueue": "Add to Queue"
+      "downloadNow": "Download Now"
     },
     "duplicate": {
       "title": "Duplicate Download Detected",
@@ -53,7 +52,6 @@
     "readyToView": "Ready to view",
     "noActiveDownloads": "No active downloads",
     "noDownloadHistory": "No download history",
-    "downloadFailed": "Download failed",
     "liveLogs": "Live Logs",
     "noLogsYet": "No logs yet."
   },
@@ -64,6 +62,7 @@
     "maxRetries": "Max Retries",
     "language": "Language",
     "save": "Save",
+    "saved": "Settings saved.",
     "downloadDefaults": "Download Defaults",
     "diagnostics": "Diagnostics",
     "runDiagnostics": "Run Diagnostics",

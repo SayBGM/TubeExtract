@@ -1,171 +1,158 @@
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Bell, Download, FolderOpen, RefreshCcw, Save, ShieldCheck } from "lucide-react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { FormProvider, useForm } from "react-hook-form";
+import { Save } from "lucide-react";
 import {
   checkUpdate,
-  getSettings,
+  openExternalUrl,
   pickDownloadDir,
   runDiagnostics,
   setSettings,
 } from "../../lib/electronClient";
-import { useSettingsStore } from "../../store/settingsStore";
+import { settingsQueries, settingsQueryOptions } from "../../queries";
+import { useUIStore } from "../../store/uiStore";
+import type { AppSettings } from "../../types";
+import { SettingsDefaultsSection } from "./components/SettingsDefaultsSection";
+import { SettingsDiagnosticsSection } from "./components/SettingsDiagnosticsSection";
+import { SettingsUpdateSection } from "./components/SettingsUpdateSection";
+
+const EMPTY_SETTINGS: AppSettings = {
+  downloadDir: "",
+  maxRetries: 0,
+  language: "ko",
+};
 
 export function SettingsPage() {
   const { t, i18n } = useTranslation();
-  const settings = useSettingsStore((state) => state.settings);
-  const updateSettings = useSettingsStore((state) => state.setSettings);
+  const queryClient = useQueryClient();
+  const setToast = useUIStore((state) => state.setToast);
   const [diagnostics, setDiagnostics] = useState<string>("-");
   const [updateMessage, setUpdateMessage] = useState<string>("-");
 
+  const settingsForm = useForm<AppSettings>({
+    defaultValues: EMPTY_SETTINGS,
+  });
+
+  const settingsQuery = useQuery(settingsQueryOptions.current());
+
   useEffect(() => {
-    getSettings()
-      .then(updateSettings)
-      .catch(console.error);
-  }, [updateSettings]);
+    if (!settingsQuery.error) return;
+    console.error(settingsQuery.error);
+    setToast({ type: "error", message: t("common.unknownError") });
+  }, [setToast, settingsQuery.error, t]);
 
-  const onSave = async () => {
-    await setSettings(settings);
-    await i18n.changeLanguage(settings.language);
-  };
+  useEffect(() => {
+    if (!settingsQuery.data) return;
+    settingsForm.reset(settingsQuery.data);
+  }, [settingsForm, settingsQuery.data]);
 
-  const onDiagnose = async () => {
-    const result = await runDiagnostics();
-    setDiagnostics(result.message);
-  };
+  const saveSettingsMutation = useMutation({
+    mutationFn: setSettings,
+    onSuccess: async (_response, nextSettings) => {
+      queryClient.setQueryData(settingsQueries.current.queryKey, nextSettings);
+      settingsForm.reset(nextSettings);
+      await i18n.changeLanguage(nextSettings.language);
+      setToast({ type: "success", message: t("settings.saved") });
+    },
+    onError: (error) => {
+      console.error(error);
+      setToast({ type: "error", message: t("common.unknownError") });
+    },
+  });
 
-  const onCheckUpdate = async () => {
-    const result = await checkUpdate();
-    if (!result.hasUpdate) {
-      setUpdateMessage(t("settings.update.latest"));
-      return;
-    }
-    setUpdateMessage(
-      t("settings.update.available", {
-        version: result.latestVersion,
-      }),
-    );
-    if (result.url) {
-      window.open(result.url, "_blank");
-    }
-  };
+  const diagnosticsMutation = useMutation({
+    mutationFn: runDiagnostics,
+    onSuccess: (result) => {
+      setDiagnostics(result.message);
+    },
+    onError: (error) => {
+      console.error(error);
+      setToast({ type: "error", message: t("common.unknownError") });
+    },
+  });
+
+  const updateMutation = useMutation({
+    mutationFn: checkUpdate,
+    onSuccess: async (result) => {
+      if (!result.hasUpdate) {
+        setUpdateMessage(t("settings.update.latest"));
+        return;
+      }
+
+      setUpdateMessage(
+        t("settings.update.available", {
+          version: result.latestVersion,
+        }),
+      );
+
+      if (result.url) {
+        await openExternalUrl(result.url);
+      }
+    },
+    onError: (error) => {
+      console.error(error);
+      setToast({ type: "error", message: t("common.unknownError") });
+    },
+  });
+
+  const isLoadingSettings = settingsQuery.isPending && !settingsQuery.data;
+  const isSaveDisabled =
+    isLoadingSettings ||
+    saveSettingsMutation.isPending ||
+    !settingsForm.formState.isDirty;
+
+  const onSubmit = settingsForm.handleSubmit(async (values) => {
+    await saveSettingsMutation.mutateAsync(values);
+  });
 
   const onPickDownloadDir = async () => {
-    const selected = await pickDownloadDir();
-    if (!selected) return;
-    updateSettings({ ...settings, downloadDir: selected });
+    try {
+      const selected = await pickDownloadDir();
+      if (!selected) return;
+      settingsForm.setValue("downloadDir", selected, { shouldDirty: true });
+    } catch (error) {
+      console.error(error);
+      setToast({ type: "error", message: t("common.unknownError") });
+    }
   };
 
   return (
     <section className="max-w-4xl mx-auto pt-10">
       <h1 className="text-3xl font-bold text-white mb-8">{t("settings.title")}</h1>
 
-      <div className="space-y-6">
-        <div className="bg-zinc-900 border border-zinc-800 rounded-2xl overflow-hidden">
-          <div className="p-6 border-b border-zinc-800">
-            <h2 className="text-lg font-semibold text-white flex items-center gap-2">
-              <Download className="w-5 h-5 text-blue-500" />
-              {t("settings.downloadDefaults")}
-            </h2>
-          </div>
-          <div className="p-6 space-y-6">
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-              <div>
-                <label className="block text-sm font-medium text-zinc-400 mb-2">{t("settings.language")}</label>
-                <select
-                  data-testid="settings-language-select"
-                  className="w-full bg-zinc-950 border border-zinc-800 text-white rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-blue-500/50"
-                  value={settings.language}
-                  onChange={(e) =>
-                    updateSettings({ ...settings, language: e.target.value as "ko" | "en" })
-                  }
-                >
-                  <option value="ko">한국어</option>
-                  <option value="en">English</option>
-                </select>
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-zinc-400 mb-2">{t("settings.maxRetries")}</label>
-                <input
-                  className="w-full bg-zinc-950 border border-zinc-800 text-white rounded-xl px-4 py-3 focus:outline-none focus:ring-2 focus:ring-blue-500/50"
-                  type="number"
-                  min={0}
-                  max={10}
-                  value={settings.maxRetries}
-                  onChange={(e) =>
-                    updateSettings({ ...settings, maxRetries: Number(e.target.value) || 0 })
-                  }
-                />
-              </div>
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-zinc-400 mb-2">{t("settings.downloadDir")}</label>
-              <div className="flex gap-2">
-                <input
-                  className="w-full bg-zinc-950 border border-zinc-800 text-zinc-300 rounded-xl px-4 py-3 focus:outline-none"
-                  value={settings.downloadDir}
-                  onChange={(e) => updateSettings({ ...settings, downloadDir: e.target.value })}
-                />
-                <button
-                  type="button"
-                  onClick={() => void onPickDownloadDir()}
-                  className="shrink-0 bg-zinc-800 hover:bg-zinc-700 text-white rounded-xl px-4 py-3 inline-flex items-center gap-2 transition-colors"
-                >
-                  <FolderOpen className="w-4 h-4" />
-                  {t("settings.pickFolder")}
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
+      <FormProvider {...settingsForm}>
+        <form className="space-y-6" onSubmit={onSubmit}>
+          <SettingsDefaultsSection
+            isLoading={isLoadingSettings}
+            onPickDownloadDir={onPickDownloadDir}
+          />
 
-        <div className="bg-zinc-900 border border-zinc-800 rounded-2xl overflow-hidden">
-          <div className="p-6 border-b border-zinc-800">
-            <h2 className="text-lg font-semibold text-white flex items-center gap-2">
-              <Bell className="w-5 h-5 text-yellow-500" />
-              {t("settings.diagnostics")}
-            </h2>
-          </div>
-          <div className="p-6 space-y-4">
-            <p className="text-sm text-zinc-400">{diagnostics}</p>
+          <SettingsDiagnosticsSection
+            diagnostics={diagnostics}
+            isPending={diagnosticsMutation.isPending}
+            onDiagnose={() => diagnosticsMutation.mutate()}
+          />
+
+          <SettingsUpdateSection
+            updateMessage={updateMessage}
+            isPending={updateMutation.isPending}
+            onCheckUpdate={() => updateMutation.mutate()}
+          />
+
+          <div className="flex justify-end pt-4">
             <button
-              onClick={() => void onDiagnose()}
-              className="bg-zinc-800 hover:bg-zinc-700 text-white px-4 py-2 rounded-xl font-medium transition-colors"
+              type="submit"
+              data-testid="settings-save-button"
+              className="bg-blue-600 hover:bg-blue-500 text-white px-8 py-3 rounded-xl font-bold shadow-lg shadow-blue-900/20 flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+              disabled={isSaveDisabled}
             >
-              {t("settings.runDiagnostics")}
+              <Save className="w-4 h-4" />
+              {t("settings.save")}
             </button>
           </div>
-        </div>
-
-        <div className="bg-zinc-900 border border-zinc-800 rounded-2xl overflow-hidden">
-          <div className="p-6 border-b border-zinc-800">
-            <h2 className="text-lg font-semibold text-white flex items-center gap-2">
-              <ShieldCheck className="w-5 h-5 text-emerald-500" />
-              {t("settings.update.title")}
-            </h2>
-          </div>
-          <div className="p-6 space-y-4">
-            <p className="text-sm text-zinc-400">{updateMessage}</p>
-            <button
-              onClick={() => void onCheckUpdate()}
-              className="bg-zinc-800 hover:bg-zinc-700 text-white px-4 py-2 rounded-xl font-medium transition-colors inline-flex items-center gap-2"
-            >
-              <RefreshCcw className="w-4 h-4" />
-              {t("settings.update.check")}
-            </button>
-          </div>
-        </div>
-
-        <div className="flex justify-end pt-4">
-          <button
-            data-testid="settings-save-button"
-            className="bg-blue-600 hover:bg-blue-500 text-white px-8 py-3 rounded-xl font-bold shadow-lg shadow-blue-900/20 flex items-center gap-2"
-            onClick={() => void onSave()}
-          >
-            <Save className="w-4 h-4" />
-            {t("settings.save")}
-          </button>
-        </div>
-      </div>
+        </form>
+      </FormProvider>
     </section>
   );
 }

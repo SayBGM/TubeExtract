@@ -1,33 +1,19 @@
 import { NavLink } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { Disc, Download, ListVideo, Settings } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useMemo } from "react";
 import { useQueueStore } from "../store/queueStore";
 import { cn } from "../lib/cn";
-import { getStorageStats } from "../lib/electronClient";
-import type { StorageStats } from "../types";
+import { useStorageStats } from "../hooks/useStorageStats";
 
 export function Sidebar() {
   const { t } = useTranslation();
   const jobs = useQueueStore((state) => state.jobs);
-  const activeCount = jobs.filter((job) => job.status === "downloading").length;
-  const [storageStats, setStorageStats] = useState<StorageStats>();
-
-  useEffect(() => {
-    const loadStorageStats = async () => {
-      const stats = await getStorageStats();
-      setStorageStats(stats);
-    };
-
-    loadStorageStats().catch(console.error);
-    const timer = window.setInterval(() => {
-      loadStorageStats().catch(console.error);
-    }, 10_000);
-
-    return () => {
-      window.clearInterval(timer);
-    };
-  }, []);
+  const activeCount = useMemo(
+    () => jobs.filter((job) => job.status === "downloading").length,
+    [jobs],
+  );
+  const storageStats = useStorageStats();
 
   const storageLabel = useMemo(() => {
     if (!storageStats) return t("sidebar.loading");
@@ -42,11 +28,14 @@ export function Sidebar() {
     return t("sidebar.downloads", { size: formatBytes(storageStats.downloadDirBytes) });
   }, [storageStats, t]);
 
-  const navItems = [
-    { label: t("sidebar.setup"), to: "/setup", icon: Download },
-    { label: t("sidebar.queue"), to: "/queue", icon: ListVideo, badge: activeCount || undefined },
-    { label: t("sidebar.settings"), to: "/settings", icon: Settings },
-  ];
+  const navItems = useMemo(
+    () => [
+      { label: t("sidebar.setup"), to: "/setup", icon: Download },
+      { label: t("sidebar.queue"), to: "/queue", icon: ListVideo, badge: activeCount || undefined },
+      { label: t("sidebar.settings"), to: "/settings", icon: Settings },
+    ],
+    [activeCount, t],
+  );
 
   return (
     <aside className="w-64 bg-zinc-950 border-r border-zinc-800 h-screen flex flex-col fixed left-0 top-0">

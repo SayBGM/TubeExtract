@@ -1,13 +1,21 @@
 export type DownloadMode = "video" | "audio";
 
-export type JobStatus =
-  | "queued"
-  | "analyzing"
-  | "downloading"
-  | "paused"
-  | "completed"
-  | "failed"
-  | "canceled";
+export const JOB_STATUSES = [
+  "queued",
+  "analyzing",
+  "downloading",
+  "paused",
+  "completed",
+  "failed",
+  "canceled",
+] as const;
+export type JobStatus = (typeof JOB_STATUSES)[number];
+
+export const TERMINAL_JOB_STATUSES = ["completed", "failed", "canceled"] as const;
+export type TerminalJobStatus = (typeof TERMINAL_JOB_STATUSES)[number];
+
+export const SUPPORTED_LANGUAGES = ["ko", "en"] as const;
+export type AppLanguage = (typeof SUPPORTED_LANGUAGES)[number];
 
 export interface QualityOption {
   id: string;
@@ -57,7 +65,7 @@ export interface DiagnosticsResult {
 export interface AppSettings {
   downloadDir: string;
   maxRetries: number;
-  language: "ko" | "en";
+  language: AppLanguage;
 }
 
 export interface DuplicateCheckResult {
