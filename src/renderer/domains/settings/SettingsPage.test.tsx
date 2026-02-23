@@ -68,9 +68,9 @@ vi.mock("@tanstack/react-query", async () => {
   };
 });
 
-vi.mock("../../lib/electronClient", async () => {
-  const actual = await vi.importActual<typeof import("../../lib/electronClient")>(
-    "../../lib/electronClient",
+vi.mock("../../lib/desktopClient", async () => {
+  const actual = await vi.importActual<typeof import("../../lib/desktopClient")>(
+    "../../lib/desktopClient",
   );
 
   return {

@@ -1,8 +1,8 @@
 import { useEffect } from "react";
-import { getQueueSnapshot, isNativeDesktop, onQueueUpdated } from "../lib/electronClient";
+import { getQueueSnapshot, isNativeDesktop, onQueueUpdated } from "../lib/desktopClient";
 import { useQueueStore } from "../store/queueStore";
 
-const QUEUE_POLLING_INTERVAL_MS = 1000;
+const WEB_QUEUE_POLLING_INTERVAL_MS = 300;
 
 export function useQueueEvents() {
   const applyQueueSnapshot = useQueueStore((state) => state.applyQueueSnapshot);
@@ -10,22 +10,28 @@ export function useQueueEvents() {
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     let pollTimer: number | undefined;
+    const nativeDesktop = isNativeDesktop();
 
     const setup = async () => {
-      const snapshot = await getQueueSnapshot();
-      applyQueueSnapshot(snapshot.items);
-
-      if (isNativeDesktop()) {
+      if (nativeDesktop) {
         unlisten = onQueueUpdated((snapshot) => {
           applyQueueSnapshot(snapshot.items);
         });
-      } else {
-        pollTimer = window.setInterval(() => {
-          getQueueSnapshot()
-            .then((snapshot) => applyQueueSnapshot(snapshot.items))
-            .catch(console.error);
-        }, QUEUE_POLLING_INTERVAL_MS);
+
+        // Initial hydration once, then rely on event stream only.
+        const snapshot = await getQueueSnapshot();
+        applyQueueSnapshot(snapshot.items);
+        return;
       }
+
+      const syncSnapshot = () => {
+        getQueueSnapshot()
+          .then((nextSnapshot) => applyQueueSnapshot(nextSnapshot.items))
+          .catch(console.error);
+      };
+
+      syncSnapshot();
+      pollTimer = window.setInterval(syncSnapshot, WEB_QUEUE_POLLING_INTERVAL_MS);
     };
 
     setup().catch(console.error);

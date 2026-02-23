@@ -1,6 +1,6 @@
 import { createQueryKeys } from "@lukemorales/query-key-factory";
 import { queryOptions } from "@tanstack/react-query";
-import { getSettings } from "../lib/electronClient";
+import { getSettings } from "../lib/desktopClient";
 
 const FIVE_MINUTES_MS = 5 * 60 * 1000;
 

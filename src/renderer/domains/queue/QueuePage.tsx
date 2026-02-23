@@ -58,6 +58,46 @@ export function QueuePage() {
     }
   };
 
+  const onPauseJob = async (jobId: string) => {
+    try {
+      const items = await queueActions.pauseJob(jobId);
+      applyQueueSnapshot(items);
+    } catch (error) {
+      console.error(error);
+      setToast({ type: "error", message: t("common.unknownError") });
+    }
+  };
+
+  const onResumeJob = async (jobId: string) => {
+    try {
+      const items = await queueActions.resumeJob(jobId);
+      applyQueueSnapshot(items);
+    } catch (error) {
+      console.error(error);
+      setToast({ type: "error", message: t("common.unknownError") });
+    }
+  };
+
+  const onCancelJob = async (jobId: string) => {
+    try {
+      const items = await queueActions.cancelJob(jobId);
+      applyQueueSnapshot(items);
+    } catch (error) {
+      console.error(error);
+      setToast({ type: "error", message: t("common.unknownError") });
+    }
+  };
+
+  const onDeleteFile = async (path: string) => {
+    try {
+      const items = await queueActions.deleteFile(path);
+      applyQueueSnapshot(items);
+    } catch (error) {
+      console.error(error);
+      setToast({ type: "error", message: t("common.unknownError") });
+    }
+  };
+
   return (
     <section className="max-w-6xl mx-auto pt-8 px-4">
       <QueueSummaryCards
@@ -69,16 +109,16 @@ export function QueuePage() {
       <ActiveQueueList
         activeJobs={activeJobs}
         onOpenVideoInBrowser={openVideoInBrowser}
-        onPauseJob={queueActions.pauseJob}
-        onResumeJob={queueActions.resumeJob}
-        onCancelJob={queueActions.cancelJob}
+        onPauseJob={onPauseJob}
+        onResumeJob={onResumeJob}
+        onCancelJob={onCancelJob}
       />
 
       <CompletedQueueList
         completedJobs={completedJobs}
         onClearTerminalJobs={onClearTerminalJobs}
         onOpenFolder={queueActions.openFolder}
-        onDeleteFile={queueActions.deleteFile}
+        onDeleteFile={onDeleteFile}
       />
     </section>
   );

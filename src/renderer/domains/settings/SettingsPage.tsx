@@ -9,7 +9,7 @@ import {
   pickDownloadDir,
   runDiagnostics,
   setSettings,
-} from "../../lib/electronClient";
+} from "../../lib/desktopClient";
 import { settingsQueries, settingsQueryOptions } from "../../queries";
 import { useUIStore } from "../../store/uiStore";
 import type { AppSettings } from "../../types";

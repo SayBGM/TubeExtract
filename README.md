@@ -1,7 +1,7 @@
 # TubeExtract (yt-downloder)
 
-유튜브 URL을 분석해 영상/오디오를 다운로드할 수 있는 Electron 데스크톱 앱입니다.  
-React + TypeScript + Vite 기반 렌더러와 Electron 메인 프로세스로 구성되어 있습니다.
+유튜브 URL을 분석해 영상/오디오를 다운로드할 수 있는 데스크톱 앱입니다.  
+React + TypeScript + Vite 렌더러와 Tauri 런타임으로 구성되어 있습니다.
 
 ## 주요 기능
 
@@ -14,7 +14,7 @@ React + TypeScript + Vite 기반 렌더러와 Electron 메인 프로세스로 �
 
 ## 기술 스택
 
-- Electron
+- Tauri
 - React 19
 - TypeScript
 - Vite
@@ -35,15 +35,15 @@ npm install
 ### 2) 개발 실행
 
 ```bash
-npm run electron:dev
+npm run tauri:dev
 ```
 
 ## 스크립트
 
 - `npm run dev`: Vite 개발 서버 실행
-- `npm run electron:dev`: Vite + Electron 동시 실행
+- `npm run tauri:dev`: Tauri 개발 실행 (Rust/Tauri CLI 필요)
 - `npm run build`: 프론트엔드 빌드
-- `npm run electron:build`: 데스크톱 앱 패키징 빌드
+- `npm run tauri:build`: Tauri 번들 빌드 (Rust/Tauri CLI 필요)
 - `npm run lint`: ESLint 실행
 - `npm run test`: Vitest 실행
 - `npm run test:watch`: Vitest watch 모드
@@ -58,17 +58,17 @@ GitHub Actions에서도 PR/메인 브랜치 푸시 시 단위 테스트를 자�
 
 ## 빌드 산출물
 
-- Electron 빌드 결과물은 `release/` 디렉터리에 생성됩니다.
+- Tauri 빌드 결과물은 `src-tauri/target/` 하위에 생성됩니다.
 
 ## 프로젝트 구조 (요약)
 
 ```text
-electron/                 # Electron 메인 프로세스
+src-tauri/                # Tauri 러스트 런타임
 src/
   renderer/               # React 렌더러 앱
     domains/              # 도메인별 기능 (setup, queue, settings)
     components/           # 공용 컴포넌트
-    lib/                  # Electron 브리지/유틸
+    lib/                  # 데스크톱 브리지/유틸
     queries/              # React Query 키/옵션
     store/                # Zustand 스토어
   test/                   # 테스트 유틸/목

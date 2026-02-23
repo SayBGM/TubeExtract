@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
 import {
   getDependencyBootstrapStatus,
+  isNativeDesktop,
   onDependencyBootstrapUpdated,
-} from "../lib/electronClient";
+} from "../lib/desktopClient";
 import type { DependencyBootstrapStatus } from "../types";
 
 const READY_STATUS: DependencyBootstrapStatus = {
@@ -17,6 +18,7 @@ export function useDependencyBootstrap() {
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
+    let pollTimer: number | undefined;
 
     const setup = async () => {
       const initialStatus = await getDependencyBootstrapStatus();
@@ -24,6 +26,11 @@ export function useDependencyBootstrap() {
       unlisten = onDependencyBootstrapUpdated((nextStatus) => {
         setStatus(nextStatus);
       });
+      if (isNativeDesktop() && !unlisten) {
+        pollTimer = window.setInterval(() => {
+          getDependencyBootstrapStatus().then(setStatus).catch(console.error);
+        }, 1000);
+      }
     };
 
     setup().catch(console.error);
@@ -31,6 +38,9 @@ export function useDependencyBootstrap() {
     return () => {
       if (unlisten) {
         unlisten();
+      }
+      if (pollTimer) {
+        clearInterval(pollTimer);
       }
     };
   }, []);

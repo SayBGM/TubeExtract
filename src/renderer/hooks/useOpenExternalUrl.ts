@@ -1,6 +1,6 @@
 import { useCallback } from "react";
 import { useTranslation } from "react-i18next";
-import { openExternalUrl } from "../lib/electronClient";
+import { openExternalUrl } from "../lib/desktopClient";
 import { useUIStore } from "../store/uiStore";
 
 export function useOpenExternalUrl() {

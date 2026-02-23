@@ -5,7 +5,7 @@ import {
   checkDuplicate,
   enqueueJob,
   openFolder,
-} from "../../lib/electronClient";
+} from "../../lib/desktopClient";
 import { useOpenExternalUrl } from "../../hooks/useOpenExternalUrl";
 import { openConfirmModal } from "../../lib/openConfirmModal";
 import { setupQueryOptions } from "../../queries";

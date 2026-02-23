@@ -1,6 +1,6 @@
 import { createQueryKeys } from "@lukemorales/query-key-factory";
 import { queryOptions } from "@tanstack/react-query";
-import { getStorageStats } from "../lib/electronClient";
+import { getStorageStats } from "../lib/desktopClient";
 
 const STORAGE_STATS_REFETCH_INTERVAL_MS = 10 * 1000;
 

@@ -23,32 +23,29 @@ jobs:
           node-version: 20
           cache: npm
 
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
       - name: Install frontend dependencies
         run: npm ci
-
-      - name: Apply version from tag
-        shell: bash
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          npm version "$VERSION" --no-git-tag-version
 
       - name: Run unit tests
         run: npm run test
 
-      - name: Build desktop app
-        run: npm run electron:build
+      - name: Build desktop app (Tauri)
+        run: npm run tauri:build
 
       - name: Upload release assets
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
           name: TubeExtract ${{ github.ref_name }}
-          body: Automated Electron release from GitHub Actions.
+          body: Automated Tauri release from GitHub Actions.
           draft: false
           prerelease: false
           files: |
-            release/*.dmg
-            release/*.zip
-            release/*.exe
-            release/*.blockmap
-            release/latest*.yml
+            src-tauri/target/release/bundle/**/*.dmg
+            src-tauri/target/release/bundle/**/*.app.tar.gz
+            src-tauri/target/release/bundle/**/*.msi
+            src-tauri/target/release/bundle/**/*.exe
+            src-tauri/target/release/bundle/**/*.zip

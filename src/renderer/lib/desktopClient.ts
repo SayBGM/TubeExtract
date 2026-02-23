@@ -11,17 +11,17 @@ import type {
 } from "../types";
 
 export function isNativeDesktop() {
-  return Boolean(window.electronAPI);
+  return Boolean(window.__TAURI__?.core?.invoke);
 }
 
-function isElectronShell() {
-  return navigator.userAgent.includes("Electron");
+function isTauriShell() {
+  return navigator.userAgent.toLowerCase().includes("tauri");
 }
 
 function shouldUseMockMode() {
   if (isNativeDesktop()) return false;
-  if (isElectronShell()) {
-    throw new Error("Electron preload bridge is unavailable. Restart the app.");
+  if (isTauriShell()) {
+    throw new Error("Tauri bridge is unavailable. Restart the app.");
   }
   return true;
 }
@@ -33,7 +33,7 @@ let mockSettings: AppSettings = {
   language: "ko",
 };
 
-export const ELECTRON_CHANNEL = {
+export const DESKTOP_CHANNEL = {
   ANALYZE_URL: "analyze_url",
   ENQUEUE_JOB: "enqueue_job",
   CHECK_DUPLICATE: "check_duplicate",
@@ -54,17 +54,60 @@ export const ELECTRON_CHANNEL = {
   GET_DEPENDENCY_BOOTSTRAP_STATUS: "get_dependency_bootstrap_status",
 } as const;
 
-type DesktopCommandName = (typeof ELECTRON_CHANNEL)[keyof typeof ELECTRON_CHANNEL];
+type DesktopCommandName = (typeof DESKTOP_CHANNEL)[keyof typeof DESKTOP_CHANNEL];
 
 function invokeCommand<TResponse>(
   command: DesktopCommandName,
   args?: Record<string, unknown>,
 ): Promise<TResponse> {
-  const api = window.electronAPI;
-  if (!api) {
-    throw new Error("Desktop API unavailable");
+  const tauriApi = window.__TAURI__?.core;
+  if (tauriApi) {
+    return tauriApi.invoke<TResponse>(command, args);
   }
-  return api.invoke<TResponse>(command, args);
+
+  throw new Error("Desktop API unavailable");
+}
+
+function subscribeToTauriEvent<TPayload>(
+  eventName: string,
+  listener: (payload: TPayload) => void,
+): (() => void) | undefined {
+  const tauriEventApi = window.__TAURI__?.event;
+  if (!tauriEventApi) return undefined;
+
+  let isDisposed = false;
+  let unlisten: (() => void) | undefined;
+  let retryTimer: number | undefined;
+
+  const listenWithRetry = () => {
+    if (isDisposed || unlisten) return;
+    void tauriEventApi
+      .listen<TPayload>(eventName, (event) => {
+        listener(event.payload);
+      })
+      .then((cleanup) => {
+        if (isDisposed) {
+          cleanup();
+          return;
+        }
+        unlisten = cleanup;
+      })
+      .catch(() => {
+        // The runtime bridge can be late during initial boot; retry.
+        if (isDisposed) return;
+        retryTimer = window.setTimeout(listenWithRetry, 250);
+      });
+  };
+
+  listenWithRetry();
+
+  return () => {
+    isDisposed = true;
+    if (retryTimer) {
+      clearTimeout(retryTimer);
+    }
+    unlisten?.();
+  };
 }
 
 export async function analyzeUrl(url: string): Promise<AnalysisResult> {
@@ -82,7 +125,7 @@ export async function analyzeUrl(url: string): Promise<AnalysisResult> {
       audioOptions: [{ id: "140", label: "128kbps", ext: "m4a", type: "audio" }],
     };
   }
-  return invokeCommand(ELECTRON_CHANNEL.ANALYZE_URL, { url });
+  return invokeCommand(DESKTOP_CHANNEL.ANALYZE_URL, { url });
 }
 
 export async function enqueueJob(input: {
@@ -111,7 +154,7 @@ export async function enqueueJob(input: {
     });
     return { jobId: id };
   }
-  return invokeCommand(ELECTRON_CHANNEL.ENQUEUE_JOB, { input });
+  return invokeCommand(DESKTOP_CHANNEL.ENQUEUE_JOB, { input });
 }
 
 export async function checkDuplicate(input: {
@@ -125,17 +168,17 @@ export async function checkDuplicate(input: {
     );
     return { isDuplicate: Boolean(found), existingOutputPath: found?.outputPath };
   }
-  return invokeCommand(ELECTRON_CHANNEL.CHECK_DUPLICATE, { input });
+  return invokeCommand(DESKTOP_CHANNEL.CHECK_DUPLICATE, { input });
 }
 
 export async function pauseJob(id: string): Promise<void> {
   if (shouldUseMockMode()) return;
-  await invokeCommand(ELECTRON_CHANNEL.PAUSE_JOB, { id });
+  await invokeCommand<QueueSnapshot | void>(DESKTOP_CHANNEL.PAUSE_JOB, { id });
 }
 
 export async function resumeJob(id: string): Promise<void> {
   if (shouldUseMockMode()) return;
-  await invokeCommand(ELECTRON_CHANNEL.RESUME_JOB, { id });
+  await invokeCommand<QueueSnapshot | void>(DESKTOP_CHANNEL.RESUME_JOB, { id });
 }
 
 export async function cancelJob(id: string): Promise<void> {
@@ -144,7 +187,7 @@ export async function cancelJob(id: string): Promise<void> {
     if (target) target.status = "canceled";
     return;
   }
-  await invokeCommand(ELECTRON_CHANNEL.CANCEL_JOB, { id });
+  await invokeCommand<QueueSnapshot | void>(DESKTOP_CHANNEL.CANCEL_JOB, { id });
 }
 
 export async function clearTerminalJobs(): Promise<void> {
@@ -157,7 +200,7 @@ export async function clearTerminalJobs(): Promise<void> {
     }
     return;
   }
-  await invokeCommand(ELECTRON_CHANNEL.CLEAR_TERMINAL_JOBS);
+  await invokeCommand<QueueSnapshot | void>(DESKTOP_CHANNEL.CLEAR_TERMINAL_JOBS);
 }
 
 export async function deleteFile(path: string): Promise<void> {
@@ -166,12 +209,43 @@ export async function deleteFile(path: string): Promise<void> {
     if (index >= 0) mockQueue.splice(index, 1);
     return;
   }
-  await invokeCommand(ELECTRON_CHANNEL.DELETE_FILE, { path });
+  await invokeCommand<QueueSnapshot | void>(DESKTOP_CHANNEL.DELETE_FILE, { path });
+}
+
+async function invokeQueueMutation(command: DesktopCommandName, args?: Record<string, unknown>) {
+  if (shouldUseMockMode()) {
+    return { items: mockQueue } as QueueSnapshot;
+  }
+  const response = await invokeCommand<QueueSnapshot | void>(command, args);
+  if (response && typeof response === "object" && Array.isArray((response as QueueSnapshot).items)) {
+    return response as QueueSnapshot;
+  }
+  return getQueueSnapshot();
+}
+
+export async function pauseJobAndGetSnapshot(id: string) {
+  return invokeQueueMutation(DESKTOP_CHANNEL.PAUSE_JOB, { id });
+}
+
+export async function resumeJobAndGetSnapshot(id: string) {
+  return invokeQueueMutation(DESKTOP_CHANNEL.RESUME_JOB, { id });
+}
+
+export async function cancelJobAndGetSnapshot(id: string) {
+  return invokeQueueMutation(DESKTOP_CHANNEL.CANCEL_JOB, { id });
+}
+
+export async function clearTerminalJobsAndGetSnapshot() {
+  return invokeQueueMutation(DESKTOP_CHANNEL.CLEAR_TERMINAL_JOBS);
+}
+
+export async function deleteFileAndGetSnapshot(path: string) {
+  return invokeQueueMutation(DESKTOP_CHANNEL.DELETE_FILE, { path });
 }
 
 export async function openFolder(path: string): Promise<void> {
   if (shouldUseMockMode()) return;
-  await invokeCommand(ELECTRON_CHANNEL.OPEN_FOLDER, { path });
+  await invokeCommand(DESKTOP_CHANNEL.OPEN_FOLDER, { path });
 }
 
 export async function openExternalUrl(url: string): Promise<void> {
@@ -179,22 +253,22 @@ export async function openExternalUrl(url: string): Promise<void> {
     window.open(url, "_blank", "noopener,noreferrer");
     return;
   }
-  await invokeCommand(ELECTRON_CHANNEL.OPEN_EXTERNAL_URL, { url });
+  await invokeCommand(DESKTOP_CHANNEL.OPEN_EXTERNAL_URL, { url });
 }
 
 export async function getQueueSnapshot(): Promise<QueueSnapshot> {
   if (shouldUseMockMode()) return { items: mockQueue };
-  return invokeCommand(ELECTRON_CHANNEL.GET_QUEUE_SNAPSHOT);
+  return invokeCommand(DESKTOP_CHANNEL.GET_QUEUE_SNAPSHOT);
 }
 
 export async function getSettings(): Promise<AppSettings> {
   if (shouldUseMockMode()) return mockSettings;
-  return invokeCommand(ELECTRON_CHANNEL.GET_SETTINGS);
+  return invokeCommand(DESKTOP_CHANNEL.GET_SETTINGS);
 }
 
 export async function pickDownloadDir(): Promise<string | null> {
   if (shouldUseMockMode()) return null;
-  return invokeCommand<string | null>(ELECTRON_CHANNEL.PICK_DOWNLOAD_DIR);
+  return invokeCommand<string | null>(DESKTOP_CHANNEL.PICK_DOWNLOAD_DIR);
 }
 
 export async function setSettings(settings: AppSettings): Promise<void> {
@@ -202,7 +276,7 @@ export async function setSettings(settings: AppSettings): Promise<void> {
     mockSettings = settings;
     return;
   }
-  await invokeCommand(ELECTRON_CHANNEL.SET_SETTINGS, { settings });
+  await invokeCommand(DESKTOP_CHANNEL.SET_SETTINGS, { settings });
 }
 
 export async function runDiagnostics(): Promise<DiagnosticsResult> {
@@ -214,7 +288,7 @@ export async function runDiagnostics(): Promise<DiagnosticsResult> {
       message: "mock mode diagnostics: all green",
     };
   }
-  return invokeCommand(ELECTRON_CHANNEL.RUN_DIAGNOSTICS);
+  return invokeCommand(DESKTOP_CHANNEL.RUN_DIAGNOSTICS);
 }
 
 export async function checkUpdate(): Promise<{
@@ -223,7 +297,7 @@ export async function checkUpdate(): Promise<{
   url?: string;
 }> {
   if (shouldUseMockMode()) return { hasUpdate: false };
-  return invokeCommand(ELECTRON_CHANNEL.CHECK_UPDATE);
+  return invokeCommand(DESKTOP_CHANNEL.CHECK_UPDATE);
 }
 
 export async function getStorageStats(): Promise<StorageStats> {
@@ -236,7 +310,7 @@ export async function getStorageStats(): Promise<StorageStats> {
       downloadDirBytes: 12.4 * 1024 ** 3,
     };
   }
-  return invokeCommand(ELECTRON_CHANNEL.GET_STORAGE_STATS);
+  return invokeCommand(DESKTOP_CHANNEL.GET_STORAGE_STATS);
 }
 
 export async function getDependencyBootstrapStatus(): Promise<DependencyBootstrapStatus> {
@@ -248,17 +322,17 @@ export async function getDependencyBootstrapStatus(): Promise<DependencyBootstra
       errorMessage: undefined,
     };
   }
-  return invokeCommand(ELECTRON_CHANNEL.GET_DEPENDENCY_BOOTSTRAP_STATUS);
+  return invokeCommand(DESKTOP_CHANNEL.GET_DEPENDENCY_BOOTSTRAP_STATUS);
 }
 
 export function onQueueUpdated(listener: (snapshot: QueueSnapshot) => void): (() => void) | undefined {
   if (shouldUseMockMode()) return undefined;
-  return window.electronAPI?.onQueueUpdated(listener);
+  return subscribeToTauriEvent<QueueSnapshot>("queue-updated", listener);
 }
 
 export function onDependencyBootstrapUpdated(
   listener: (status: DependencyBootstrapStatus) => void,
 ): (() => void) | undefined {
   if (shouldUseMockMode()) return undefined;
-  return window.electronAPI?.onDependencyBootstrapUpdated(listener);
+  return subscribeToTauriEvent<DependencyBootstrapStatus>("dependency-bootstrap-updated", listener);
 }

@@ -10,7 +10,8 @@ import "./index.css";
 import "./renderer/i18n";
 
 document.documentElement.classList.add("dark");
-const Router = window.electronAPI ? HashRouter : BrowserRouter;
+const isDesktopShell = Boolean(window.__TAURI__?.core?.invoke);
+const Router = isDesktopShell ? HashRouter : BrowserRouter;
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>

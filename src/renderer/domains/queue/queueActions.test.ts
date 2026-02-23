@@ -2,57 +2,58 @@ import { describe, expect, it, vi } from "vitest";
 import { clearCompletedQueueJobs, queueActions } from "./queueActions";
 
 const {
-  pauseJobMock,
-  resumeJobMock,
-  cancelJobMock,
+  pauseJobAndGetSnapshotMock,
+  resumeJobAndGetSnapshotMock,
+  cancelJobAndGetSnapshotMock,
   openFolderMock,
-  deleteFileMock,
-  clearTerminalJobsMock,
-  getQueueSnapshotMock,
+  deleteFileAndGetSnapshotMock,
+  clearTerminalJobsAndGetSnapshotMock,
 } = vi.hoisted(() => ({
-  pauseJobMock: vi.fn(),
-  resumeJobMock: vi.fn(),
-  cancelJobMock: vi.fn(),
+  pauseJobAndGetSnapshotMock: vi.fn(),
+  resumeJobAndGetSnapshotMock: vi.fn(),
+  cancelJobAndGetSnapshotMock: vi.fn(),
   openFolderMock: vi.fn(),
-  deleteFileMock: vi.fn(),
-  clearTerminalJobsMock: vi.fn(),
-  getQueueSnapshotMock: vi.fn(),
+  deleteFileAndGetSnapshotMock: vi.fn(),
+  clearTerminalJobsAndGetSnapshotMock: vi.fn(),
 }));
 
-vi.mock("../../lib/electronClient", () => ({
-  pauseJob: pauseJobMock,
-  resumeJob: resumeJobMock,
-  cancelJob: cancelJobMock,
+vi.mock("../../lib/desktopClient", () => ({
+  pauseJobAndGetSnapshot: pauseJobAndGetSnapshotMock,
+  resumeJobAndGetSnapshot: resumeJobAndGetSnapshotMock,
+  cancelJobAndGetSnapshot: cancelJobAndGetSnapshotMock,
   openFolder: openFolderMock,
-  deleteFile: deleteFileMock,
-  clearTerminalJobs: clearTerminalJobsMock,
-  getQueueSnapshot: getQueueSnapshotMock,
+  deleteFileAndGetSnapshot: deleteFileAndGetSnapshotMock,
+  clearTerminalJobsAndGetSnapshot: clearTerminalJobsAndGetSnapshotMock,
 }));
 
 describe("queueActions", () => {
   it("forwards pause/resume/cancel/open/delete actions", async () => {
+    pauseJobAndGetSnapshotMock.mockResolvedValue({ items: [] });
+    resumeJobAndGetSnapshotMock.mockResolvedValue({ items: [] });
+    cancelJobAndGetSnapshotMock.mockResolvedValue({ items: [] });
+    deleteFileAndGetSnapshotMock.mockResolvedValue({ items: [] });
+
     await queueActions.pauseJob("a");
     await queueActions.resumeJob("b");
     await queueActions.cancelJob("c");
     await queueActions.openFolder("/tmp");
     await queueActions.deleteFile("/tmp/a.mp4");
 
-    expect(pauseJobMock).toHaveBeenCalledWith("a");
-    expect(resumeJobMock).toHaveBeenCalledWith("b");
-    expect(cancelJobMock).toHaveBeenCalledWith("c");
+    expect(pauseJobAndGetSnapshotMock).toHaveBeenCalledWith("a");
+    expect(resumeJobAndGetSnapshotMock).toHaveBeenCalledWith("b");
+    expect(cancelJobAndGetSnapshotMock).toHaveBeenCalledWith("c");
     expect(openFolderMock).toHaveBeenCalledWith("/tmp");
-    expect(deleteFileMock).toHaveBeenCalledWith("/tmp/a.mp4");
+    expect(deleteFileAndGetSnapshotMock).toHaveBeenCalledWith("/tmp/a.mp4");
   });
 
-  it("clears terminal jobs and returns refreshed queue snapshot items", async () => {
-    getQueueSnapshotMock.mockResolvedValue({
+  it("clears terminal jobs and returns queue snapshot items from the command response", async () => {
+    clearTerminalJobsAndGetSnapshotMock.mockResolvedValue({
       items: [{ id: "1", title: "job" }],
     });
 
     const items = await clearCompletedQueueJobs();
 
-    expect(clearTerminalJobsMock).toHaveBeenCalledTimes(1);
-    expect(getQueueSnapshotMock).toHaveBeenCalledTimes(1);
+    expect(clearTerminalJobsAndGetSnapshotMock).toHaveBeenCalledTimes(1);
     expect(items).toEqual([{ id: "1", title: "job" }]);
   });
 });
