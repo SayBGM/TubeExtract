@@ -35,6 +35,9 @@ const YTDLP_DOWNLOAD_URL_MACOS: &str =
     "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos";
 const YTDLP_DOWNLOAD_URL_LINUX: &str =
     "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux";
+#[cfg(target_os = "windows")]
+const FFMPEG_DOWNLOAD_URL_WINDOWS: &str =
+    "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip";
 
 #[cfg(target_os = "windows")]
 const COMMON_BINARY_DIRS: &[&str] = &[
@@ -547,7 +550,101 @@ fn ensure_ffmpeg_available(
     if result.code == 0 {
         return Ok(());
     }
-    Err("ffmpeg를 찾지 못했습니다. 시스템에 설치 후 다시 시도해 주세요.".to_string())
+
+    #[cfg(target_os = "windows")]
+    {
+        install_ffmpeg_windows(app, dependency)?;
+        set_dependency_status(app, dependency, true, "checking_ffmpeg", Some(98), None);
+        let ffmpeg = resolve_executable(app, "ffmpeg");
+        let recheck = run_command_capture(app, &ffmpeg, &["-version"], DIAGNOSTICS_COMMAND_TIMEOUT_MS);
+        if recheck.code == 0 {
+            return Ok(());
+        }
+        return Err("ffmpeg 자동 설치 후에도 실행에 실패했습니다.".to_string());
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        Err("ffmpeg를 찾지 못했습니다. 시스템에 설치 후 다시 시도해 주세요.".to_string())
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn install_ffmpeg_windows(
+    app: &AppHandle,
+    dependency: &Arc<Mutex<DependencyRuntimeState>>,
+) -> Result<(), String> {
+    use zip::ZipArchive;
+
+    set_dependency_status(app, dependency, true, "installing_ffmpeg", Some(88), None);
+
+    let managed_dir = managed_bin_dir_path(app);
+    fs::create_dir_all(&managed_dir).map_err(|err| err.to_string())?;
+    let ffmpeg_target = managed_executable_path(app, "ffmpeg");
+    let ffprobe_target = managed_executable_path(app, "ffprobe");
+    let zip_path = app_data_dir(app).join("ffmpeg-windows.zip");
+
+    let client = Client::builder()
+        .timeout(Duration::from_secs(300))
+        .build()
+        .map_err(|err| err.to_string())?;
+    download_file(&client, FFMPEG_DOWNLOAD_URL_WINDOWS, &zip_path, |downloaded, total| {
+        if let Some(total) = total {
+            if total > 0 {
+                let ratio = (downloaded as f64 / total as f64).clamp(0.0, 1.0);
+                let progress = (88.0 + ratio * 8.0).round() as i32;
+                set_dependency_status(app, dependency, true, "installing_ffmpeg", Some(progress), None);
+                return;
+            }
+        }
+        set_dependency_status(app, dependency, true, "installing_ffmpeg", None, None);
+    })?;
+
+    let zip_file = fs::File::open(&zip_path).map_err(|err| err.to_string())?;
+    let mut archive = ZipArchive::new(zip_file).map_err(|err| err.to_string())?;
+    let mut ffmpeg_installed = false;
+    let mut ffprobe_installed = false;
+
+    for idx in 0..archive.len() {
+        let mut entry = archive.by_index(idx).map_err(|err| err.to_string())?;
+        if !entry.is_file() {
+            continue;
+        }
+
+        let entry_name = entry.name().replace('\\', "/");
+        let destination = if entry_name.ends_with("/bin/ffmpeg.exe") {
+            Some(ffmpeg_target.clone())
+        } else if entry_name.ends_with("/bin/ffprobe.exe") {
+            Some(ffprobe_target.clone())
+        } else {
+            None
+        };
+
+        let Some(destination) = destination else {
+            continue;
+        };
+
+        let mut output = fs::File::create(&destination).map_err(|err| err.to_string())?;
+        std::io::copy(&mut entry, &mut output).map_err(|err| err.to_string())?;
+
+        if destination == ffmpeg_target {
+            ffmpeg_installed = true;
+        } else if destination == ffprobe_target {
+            ffprobe_installed = true;
+        }
+
+        if ffmpeg_installed && ffprobe_installed {
+            break;
+        }
+    }
+
+    let _ = fs::remove_file(&zip_path);
+
+    if !ffmpeg_installed {
+        return Err("ffmpeg 자동 설치에 실패했습니다.".to_string());
+    }
+
+    Ok(())
 }
 
 fn bootstrap_dependencies(app: &AppHandle, dependency: &Arc<Mutex<DependencyRuntimeState>>) -> Result<(), String> {

@@ -14,6 +14,8 @@ jobs:
     runs-on: ${{ matrix.platform }}
     permissions:
       contents: write
+    env:
+      RELEASE_VERSION: ${{ github.ref_name }}
     steps:
       - uses: actions/checkout@v4
 
@@ -29,11 +31,48 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      - name: Sync app version from tag
+        run: |
+          node -e "
+            const fs = require('fs');
+            const version = (process.env.RELEASE_VERSION || '').replace(/^v/, '');
+            const files = ['package.json', 'src-tauri/tauri.conf.json'];
+            for (const file of files) {
+              const json = JSON.parse(fs.readFileSync(file, 'utf8'));
+              json.version = version;
+              fs.writeFileSync(file, JSON.stringify(json, null, 2) + '\n');
+            }
+            const cargo = 'src-tauri/Cargo.toml';
+            const cargoText = fs.readFileSync(cargo, 'utf8').replace(
+              /^version\s*=\s*\"[^\"]+\"/m,
+              `version = \"${version}\"`
+            );
+            fs.writeFileSync(cargo, cargoText);
+          "
+
       - name: Run unit tests
         run: npm run test
 
       - name: Build desktop app (Tauri)
         run: npm run tauri:build
+
+      - name: Prepare release assets (versioned names)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+          while IFS= read -r file; do
+            base="$(basename "$file")"
+            if [[ "$base" == *.app.tar.gz ]]; then
+              stem="${base%.app.tar.gz}"
+              tagged="${stem}-${{ github.ref_name }}.app.tar.gz"
+            else
+              ext="${base##*.}"
+              stem="${base%.*}"
+              tagged="${stem}-${{ github.ref_name }}.${ext}"
+            fi
+            cp "$file" "release-assets/$tagged"
+          done < <(find src-tauri/target/release/bundle -type f \( -name "*.dmg" -o -name "*.app.tar.gz" -o -name "*.msi" -o -name "*.exe" -o -name "*.zip" \))
 
       - name: Upload release assets
         uses: softprops/action-gh-release@v2
@@ -44,8 +83,4 @@ jobs:
           draft: false
           prerelease: false
           files: |
-            src-tauri/target/release/bundle/**/*.dmg
-            src-tauri/target/release/bundle/**/*.app.tar.gz
-            src-tauri/target/release/bundle/**/*.msi
-            src-tauri/target/release/bundle/**/*.exe
-            src-tauri/target/release/bundle/**/*.zip
+            release-assets/*
