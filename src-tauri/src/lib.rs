@@ -16,6 +16,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State};
 use url::Url;
 use uuid::Uuid;
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
 
 type CommandResult<T> = Result<T, String>;
 
@@ -380,6 +382,15 @@ fn managed_path_env(app: &AppHandle) -> String {
         .unwrap_or_else(|_| env::var("PATH").unwrap_or_default())
 }
 
+fn configure_hidden_process(command: &mut Command) -> &mut Command {
+    #[cfg(target_os = "windows")]
+    {
+        // CREATE_NO_WINDOW
+        command.creation_flags(0x08000000);
+    }
+    command
+}
+
 #[derive(Debug)]
 struct CommandCaptureResult {
     code: i32,
@@ -394,7 +405,9 @@ fn run_command_capture(
     args: &[&str],
     _timeout_ms: u64,
 ) -> CommandCaptureResult {
-    let output = match Command::new(command)
+    let mut cmd = Command::new(command);
+    configure_hidden_process(&mut cmd);
+    let output = match cmd
         .args(args)
         .env("PATH", managed_path_env(app))
         .output()
@@ -1245,7 +1258,9 @@ fn start_worker_if_needed(app: AppHandle, shared: Arc<Mutex<AppState>>, runtime:
             }
 
             let yt_dlp = resolve_executable(&app, "yt-dlp");
-            let spawn_result = Command::new(&yt_dlp)
+            let mut cmd = Command::new(&yt_dlp);
+            configure_hidden_process(&mut cmd);
+            let spawn_result = cmd
                 .args(args.clone())
                 .env("PATH", managed_path_env(&app))
                 .stdout(Stdio::piped())
@@ -1894,12 +1909,17 @@ async fn open_folder(path: String) -> CommandResult<()> {
     }
     let normalized = PathBuf::from(path.trim());
     let target = if normalized.exists() {
-        normalized.clone()
+        fs::canonicalize(&normalized).unwrap_or_else(|_| normalized.clone())
     } else {
-        normalized
+        let parent = normalized
             .parent()
             .map(Path::to_path_buf)
-            .unwrap_or_else(|| PathBuf::from(path.trim()))
+            .unwrap_or_else(|| PathBuf::from(path.trim()));
+        if parent.exists() {
+            fs::canonicalize(&parent).unwrap_or(parent)
+        } else {
+            parent
+        }
     };
 
     #[cfg(target_os = "macos")]
@@ -1920,8 +1940,10 @@ async fn open_folder(path: String) -> CommandResult<()> {
     #[cfg(target_os = "windows")]
     {
         if normalized.exists() && normalized.is_file() {
+            let selected = fs::canonicalize(&normalized).unwrap_or_else(|_| normalized.clone());
             Command::new("explorer")
-                .arg(format!("/select,{}", normalized.to_string_lossy()))
+                .arg("/select,")
+                .arg(selected)
                 .spawn()
                 .map_err(|err| err.to_string())?;
         } else {
