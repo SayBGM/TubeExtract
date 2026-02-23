@@ -59,6 +59,13 @@ jobs:
       - name: Run unit tests
         run: npm run test
 
+      - name: Ensure resources directory exists
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p src-tauri/resources/bin
+          echo "placeholder" > src-tauri/resources/placeholder.txt
+
       - name: Prepare bundled dependencies (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
