@@ -53,6 +53,42 @@ jobs:
       - name: Run unit tests
         run: npm run test
 
+      - name: Prepare bundled dependencies (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force -Path "src-tauri/resources/bin" | Out-Null
+          Remove-Item -Force -ErrorAction SilentlyContinue "src-tauri/resources/bin/yt-dlp.exe"
+          Remove-Item -Force -ErrorAction SilentlyContinue "src-tauri/resources/bin/ffmpeg.exe"
+          Remove-Item -Force -ErrorAction SilentlyContinue "src-tauri/resources/bin/ffprobe.exe"
+
+          Invoke-WebRequest -Uri "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe" -OutFile "src-tauri/resources/bin/yt-dlp.exe"
+
+          $ffmpegUrls = @(
+            "https://github.com/yt-dlp/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip",
+            "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
+          )
+          $downloaded = $false
+          foreach ($url in $ffmpegUrls) {
+            try {
+              Invoke-WebRequest -Uri $url -OutFile "ffmpeg-windows.zip"
+              $downloaded = $true
+              break
+            } catch {
+              Write-Host "ffmpeg download failed from $url"
+            }
+          }
+          if (-not $downloaded) { throw "failed to download ffmpeg from all mirrors" }
+
+          Expand-Archive -Path "ffmpeg-windows.zip" -DestinationPath "ffmpeg-extract" -Force
+          $ffmpeg = Get-ChildItem -Path "ffmpeg-extract" -Recurse -Filter "ffmpeg.exe" | Select-Object -First 1
+          $ffprobe = Get-ChildItem -Path "ffmpeg-extract" -Recurse -Filter "ffprobe.exe" | Select-Object -First 1
+          if (-not $ffmpeg) { throw "ffmpeg.exe not found in downloaded archive" }
+          if (-not $ffprobe) { throw "ffprobe.exe not found in downloaded archive" }
+          Copy-Item $ffmpeg.FullName "src-tauri/resources/bin/ffmpeg.exe" -Force
+          Copy-Item $ffprobe.FullName "src-tauri/resources/bin/ffprobe.exe" -Force
+
       - name: Build desktop app (Tauri)
         run: npm run tauri:build
 

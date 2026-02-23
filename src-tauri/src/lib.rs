@@ -37,7 +37,7 @@ const YTDLP_DOWNLOAD_URL_LINUX: &str =
     "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux";
 #[cfg(target_os = "windows")]
 const FFMPEG_DOWNLOAD_URL_WINDOWS: &str =
-    "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip";
+    "https://github.com/yt-dlp/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip";
 
 #[cfg(target_os = "windows")]
 const COMMON_BINARY_DIRS: &[&str] = &[
@@ -317,6 +317,21 @@ fn managed_executable_path(app: &AppHandle, binary_name: &str) -> PathBuf {
     managed_bin_dir_path(app).join(executable_name)
 }
 
+fn bundled_executable_path(app: &AppHandle, binary_name: &str) -> Option<PathBuf> {
+    let executable_name = if cfg!(target_os = "windows") {
+        format!("{binary_name}.exe")
+    } else {
+        binary_name.to_string()
+    };
+    let resource_dir = app.path().resource_dir().ok()?;
+    let candidate = resource_dir.join("bin").join(executable_name);
+    if candidate.exists() {
+        Some(candidate)
+    } else {
+        None
+    }
+}
+
 fn binary_with_platform_extension(binary_name: &str) -> String {
     if cfg!(target_os = "windows") {
         format!("{binary_name}.exe")
@@ -329,6 +344,9 @@ fn resolve_executable(app: &AppHandle, binary_name: &str) -> String {
     let managed_path = managed_executable_path(app, binary_name);
     if managed_path.exists() {
         return managed_path.to_string_lossy().to_string();
+    }
+    if let Some(bundled_path) = bundled_executable_path(app, binary_name) {
+        return bundled_path.to_string_lossy().to_string();
     }
 
     let with_ext = binary_with_platform_extension(binary_name);
@@ -486,6 +504,13 @@ fn ensure_ytdlp(
     check_latest: bool,
 ) -> Result<(), String> {
     set_dependency_status(app, dependency, true, "checking_yt_dlp", Some(15), None);
+
+    let resolved = resolve_executable(app, "yt-dlp");
+    let check_existing = run_command_capture(app, &resolved, &["--version"], YTDLP_VERSION_CHECK_TIMEOUT_MS);
+    if check_existing.code == 0 {
+        // If yt-dlp exists (bundled/system/managed), use it as-is.
+        return Ok(());
+    }
 
     let target = managed_executable_path(app, "yt-dlp");
     let _ = fs::create_dir_all(managed_bin_dir_path(app));
