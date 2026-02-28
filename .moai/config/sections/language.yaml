@@ -27,9 +27,10 @@ language:
   code_comments: "ko"
 
   # Documentation language
+  # HARD RULE: All project documentation files MUST be authored in English.
   # Options: en (English), ko, ja, zh, or match conversation_language
-  # Can differ from conversation_language for international docs
-  documentation: "ko"
+  # Keep this as "en" unless there is an explicit migration decision.
+  documentation: "en"
 
   # Error message language
   # Options: en (English), ko, ja, zh, or match conversation_language

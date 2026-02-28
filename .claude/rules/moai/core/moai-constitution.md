@@ -40,6 +40,7 @@ Rules:
 - XML tags are reserved for agent-to-agent data transfer
 - Use Markdown for all user-facing communication
 - Format code blocks with appropriate language identifiers
+- All project documentation files MUST be written in English
 
 ## Quality Gates
 
