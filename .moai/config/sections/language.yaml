@@ -24,7 +24,7 @@ language:
   # Code comment language
   # Options: en (English, recommended), ko, ja, zh
   # Recommended: "en" for international collaboration
-  code_comments: "ko"
+  code_comments: "en"
 
   # Documentation language
   # HARD RULE: All project documentation files MUST be authored in English.
