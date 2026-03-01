@@ -201,9 +201,14 @@ struct ActiveProcess {
     child: Arc<Mutex<Child>>,
 }
 
-#[derive(Default, Clone)]
+#[derive(Default)]
 struct RuntimeState {
     active_process: Option<ActiveProcess>,
+    // Shutdown sender for graceful worker thread termination.
+    // None until a worker thread is started.
+    shutdown_tx: Option<std::sync::mpsc::Sender<()>>,
+    // Handle for the worker thread.
+    worker_handle: Option<std::thread::JoinHandle<()>>,
 }
 
 #[derive(Clone)]
@@ -403,15 +408,107 @@ fn run_command_capture(
     app: &AppHandle,
     command: &str,
     args: &[&str],
-    _timeout_ms: u64,
+    timeout_ms: u64,
 ) -> CommandCaptureResult {
     let mut cmd = Command::new(command);
     configure_hidden_process(&mut cmd);
-    let output = match cmd
+    let mut child = match cmd
         .args(args)
         .env("PATH", managed_path_env(app))
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
     {
+        Ok(child) => child,
+        Err(err) => {
+            return CommandCaptureResult {
+                code: 1,
+                stdout: String::new(),
+                stderr: err.to_string(),
+                timed_out: false,
+            };
+        }
+    };
+
+    // Watchdog: kill the process if timeout_ms > 0 and time is exceeded.
+    if timeout_ms > 0 {
+        let child_id = child.id();
+        let deadline = std::time::Instant::now() + Duration::from_millis(timeout_ms);
+        std::thread::spawn(move || {
+            // Poll until deadline, then attempt to kill.
+            while std::time::Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            // Best-effort kill by PID; the process may have already exited.
+            #[cfg(unix)]
+            {
+                let _ = Command::new("kill")
+                    .args(["-9", &child_id.to_string()])
+                    .status();
+            }
+            #[cfg(windows)]
+            {
+                let _ = Command::new("taskkill")
+                    .args(["/F", "/PID", &child_id.to_string()])
+                    .status();
+            }
+        });
+    }
+
+    // Poll for process completion.
+    let deadline = if timeout_ms > 0 {
+        Some(std::time::Instant::now() + Duration::from_millis(timeout_ms))
+    } else {
+        None
+    };
+
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                if let Some(dl) = deadline {
+                    if std::time::Instant::now() >= dl {
+                        // Timed out; collect whatever output is available and return.
+                        let stdout_bytes = child
+                            .stdout
+                            .take()
+                            .and_then(|mut s| {
+                                let mut buf = Vec::new();
+                                s.read_to_end(&mut buf).ok().map(|_| buf)
+                            })
+                            .unwrap_or_default();
+                        let stderr_bytes = child
+                            .stderr
+                            .take()
+                            .and_then(|mut s| {
+                                let mut buf = Vec::new();
+                                s.read_to_end(&mut buf).ok().map(|_| buf)
+                            })
+                            .unwrap_or_default();
+                        eprintln!("[STABILITY] Command timed out after {}ms", timeout_ms);
+                        return CommandCaptureResult {
+                            code: -1,
+                            stdout: String::from_utf8_lossy(&stdout_bytes).to_string(),
+                            stderr: String::from_utf8_lossy(&stderr_bytes).to_string(),
+                            timed_out: true,
+                        };
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(err) => {
+                return CommandCaptureResult {
+                    code: 1,
+                    stdout: String::new(),
+                    stderr: err.to_string(),
+                    timed_out: false,
+                };
+            }
+        }
+    }
+
+    // Process finished within timeout; collect output.
+    let output = match child.wait_with_output() {
         Ok(output) => output,
         Err(err) => {
             return CommandCaptureResult {
@@ -960,7 +1057,7 @@ fn build_unique_output_path(state: &AppState, title: &str, mode: &DownloadMode) 
         let exists_in_queue = state.queue.iter().any(|item| {
             item.output_path
                 .as_ref()
-                .map(|p| PathBuf::from(p) == candidate)
+                .map(|p| *p == candidate)
                 .unwrap_or(false)
                 && item.status != "failed"
                 && item.status != "canceled"
@@ -1031,7 +1128,10 @@ fn handle_download_output_line(shared: &Arc<Mutex<AppState>>, app: &AppHandle, j
         let mut state = match shared.try_lock() {
             Ok(guard) => guard,
             Err(TryLockError::WouldBlock) => return,
-            Err(TryLockError::Poisoned(_)) => panic!("state lock poisoned"),
+            Err(TryLockError::Poisoned(e)) => {
+                eprintln!("[STABILITY] Mutex poisoned (try_lock), recovering");
+                e.into_inner()
+            }
         };
 
         if let Some(item) = state.queue.iter_mut().find(|queued| queued.id == job_id) {
@@ -1042,12 +1142,11 @@ fn handle_download_output_line(shared: &Arc<Mutex<AppState>>, app: &AppHandle, j
 
             should_emit |= append_download_log(item, normalized);
 
-            if normalized.contains("ERROR:") || normalized.contains("HTTP Error") {
-                if item.error_message.as_deref() != Some(normalized) {
+            if (normalized.contains("ERROR:") || normalized.contains("HTTP Error"))
+                && item.error_message.as_deref() != Some(normalized) {
                     item.error_message = Some(normalized.to_string());
                     should_emit = true;
                 }
-            }
             if let Some(progress) = parse_progress_percent(normalized) {
                 if (item.progress_percent - progress).abs() > f64::EPSILON {
                     item.progress_percent = progress;
@@ -1103,7 +1202,7 @@ fn try_terminate_child_gracefully(child: &mut Child) -> bool {
     #[cfg(unix)]
     {
         let status = Command::new("kill").args(["-INT", &pid]).status();
-        return status.map(|result| result.success()).unwrap_or(false);
+        status.map(|result| result.success()).unwrap_or(false)
     }
 
     #[cfg(windows)]
@@ -1134,7 +1233,28 @@ fn terminate_child_with_grace_period(child: &mut Child) {
         }
     }
 
-    let _ = child.kill();
+    // Verify whether the process has already exited before force-killing.
+    match child.try_wait() {
+        Ok(Some(_)) => {
+            // Process already exited; skip force kill.
+        }
+        Ok(None) => {
+            // Process still running; apply force kill.
+            eprintln!("[STABILITY] Process still running after grace period; force killing");
+            #[cfg(windows)]
+            {
+                let pid = child.id().to_string();
+                let _ = Command::new("taskkill")
+                    .args(["/F", "/T", "/PID", &pid])
+                    .status();
+            }
+            let _ = child.kill();
+        }
+        Err(_) => {
+            // Cannot determine process state; attempt kill as a precaution.
+            let _ = child.kill();
+        }
+    }
 }
 
 fn clear_active_process(runtime: &Arc<Mutex<RuntimeState>>, job_id: &str) {
@@ -1152,7 +1272,10 @@ fn clear_active_process(runtime: &Arc<Mutex<RuntimeState>>, job_id: &str) {
 
 fn start_worker_if_needed(app: AppHandle, shared: Arc<Mutex<AppState>>, runtime: Arc<Mutex<RuntimeState>>) {
     let should_start = {
-        let mut state = shared.lock().unwrap_or_else(|_| panic!("state lock poisoned"));
+        let mut state = shared.lock().unwrap_or_else(|e| {
+    eprintln!("[STABILITY] Mutex poisoned, recovering: {:?}", e);
+    e.into_inner()
+});
         if state.active_job_id.is_some() {
             false
         } else if state.queue.iter().any(|item| item.status == "queued") {
@@ -1167,9 +1290,31 @@ fn start_worker_if_needed(app: AppHandle, shared: Arc<Mutex<AppState>>, runtime:
         return;
     }
 
-    std::thread::spawn(move || loop {
+    // Create a shutdown channel for graceful worker termination.
+    let (shutdown_tx, shutdown_rx) = std::sync::mpsc::channel::<()>();
+    {
+        let mut rt = runtime.lock().unwrap_or_else(|e| {
+            eprintln!("[STABILITY] Runtime mutex poisoned, recovering: {:?}", e);
+            e.into_inner()
+        });
+        rt.shutdown_tx = Some(shutdown_tx);
+    }
+
+    // Clone runtime Arc so the closure can own one reference and we keep another for handle storage.
+    let runtime_for_thread = runtime.clone();
+    let handle = std::thread::spawn(move || {
+        let runtime = runtime_for_thread;
+        loop {
+        // Check for shutdown signal before processing the next job.
+        if shutdown_rx.try_recv().is_ok() {
+            eprintln!("[STABILITY] Worker thread received shutdown signal; exiting");
+            return;
+        }
         let current_job = {
-            let mut state = shared.lock().unwrap_or_else(|_| panic!("state lock poisoned"));
+            let mut state = shared.lock().unwrap_or_else(|e| {
+    eprintln!("[STABILITY] Mutex poisoned, recovering: {:?}", e);
+    e.into_inner()
+});
             let next_index = state.queue.iter().position(|item| item.status == "queued");
             if let Some(index) = next_index {
                 state.queue[index].status = "downloading".to_string();
@@ -1190,7 +1335,10 @@ fn start_worker_if_needed(app: AppHandle, shared: Arc<Mutex<AppState>>, runtime:
 
         if let Some(dependency) = app.try_state::<SharedDependencyState>() {
             if let Err(err) = wait_for_dependencies(&app, &dependency.0) {
-                let mut state = shared.lock().unwrap_or_else(|_| panic!("state lock poisoned"));
+                let mut state = shared.lock().unwrap_or_else(|e| {
+    eprintln!("[STABILITY] Mutex poisoned, recovering: {:?}", e);
+    e.into_inner()
+});
                 if let Some(item) = state.queue.iter_mut().find(|item| item.id == job.id) {
                     item.status = "failed".to_string();
                     item.error_message = Some(err);
@@ -1202,7 +1350,10 @@ fn start_worker_if_needed(app: AppHandle, shared: Arc<Mutex<AppState>>, runtime:
         }
 
         let (download_dir, final_output_path, max_retries) = {
-            let state = shared.lock().unwrap_or_else(|_| panic!("state lock poisoned"));
+            let state = shared.lock().unwrap_or_else(|e| {
+    eprintln!("[STABILITY] Mutex poisoned, recovering: {:?}", e);
+    e.into_inner()
+});
             let path = build_unique_output_path(&state, &job.title, &job.mode);
             (
                 state.settings.download_dir.clone(),
@@ -1245,7 +1396,10 @@ fn start_worker_if_needed(app: AppHandle, shared: Arc<Mutex<AppState>>, runtime:
         let mut attempt: usize = 0;
         loop {
             {
-                let state = shared.lock().unwrap_or_else(|_| panic!("state lock poisoned"));
+                let state = shared.lock().unwrap_or_else(|e| {
+    eprintln!("[STABILITY] Mutex poisoned, recovering: {:?}", e);
+    e.into_inner()
+});
                 let stopped = state
                     .queue
                     .iter()
@@ -1274,7 +1428,10 @@ fn start_worker_if_needed(app: AppHandle, shared: Arc<Mutex<AppState>>, runtime:
 
                     let child_arc = Arc::new(Mutex::new(child));
                     {
-                        let mut guard = runtime.lock().unwrap_or_else(|_| panic!("runtime lock poisoned"));
+                        let mut guard = runtime.lock().unwrap_or_else(|e| {
+    eprintln!("[STABILITY] Runtime mutex poisoned, recovering: {:?}", e);
+    e.into_inner()
+});
                         guard.active_process = Some(ActiveProcess {
                             job_id: job.id.clone(),
                             child: child_arc.clone(),
@@ -1307,7 +1464,10 @@ fn start_worker_if_needed(app: AppHandle, shared: Arc<Mutex<AppState>>, runtime:
                         let status = {
                             // Keep the child lock only for try_wait, so pause/cancel can acquire it.
                             let mut locked_child =
-                                child_arc.lock().unwrap_or_else(|_| panic!("child lock poisoned"));
+                                child_arc.lock().unwrap_or_else(|e| {
+    eprintln!("[STABILITY] Child mutex poisoned, recovering: {:?}", e);
+    e.into_inner()
+});
                             locked_child.try_wait()
                         };
 
@@ -1337,7 +1497,10 @@ fn start_worker_if_needed(app: AppHandle, shared: Arc<Mutex<AppState>>, runtime:
 
             let mut should_retry = false;
             {
-                let mut state = shared.lock().unwrap_or_else(|_| panic!("state lock poisoned"));
+                let mut state = shared.lock().unwrap_or_else(|e| {
+    eprintln!("[STABILITY] Mutex poisoned, recovering: {:?}", e);
+    e.into_inner()
+});
                 if let Some(item) = state.queue.iter_mut().find(|item| item.id == job.id) {
                     if item.status == "paused" || item.status == "canceled" {
                         // Keep paused/canceled state as-is.
@@ -1384,7 +1547,17 @@ fn start_worker_if_needed(app: AppHandle, shared: Arc<Mutex<AppState>>, runtime:
         }
 
         remove_directory_safe(&temp_dir);
-    });
+        } // end loop
+    }); // end thread closure
+
+    // Store the worker handle for graceful join on shutdown.
+    {
+        let mut rt = runtime.lock().unwrap_or_else(|e| {
+            eprintln!("[STABILITY] Runtime mutex poisoned, recovering: {:?}", e);
+            e.into_inner()
+        });
+        rt.worker_handle = Some(handle);
+    }
 }
 
 #[tauri::command]
@@ -2000,17 +2173,17 @@ async fn open_external_url(url: String) -> CommandResult<()> {
 }
 
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .setup(|app| {
-            remove_directory_safe(&temp_downloads_root_dir(&app.app_handle()));
+            remove_directory_safe(&temp_downloads_root_dir(app.app_handle()));
 
             let mut initial_state = AppState {
                 queue: Vec::new(),
                 settings: default_settings(),
                 active_job_id: None,
             };
-            load_settings(&app.app_handle(), &mut initial_state);
-            load_queue(&app.app_handle(), &mut initial_state);
+            load_settings(app.app_handle(), &mut initial_state);
+            load_queue(app.app_handle(), &mut initial_state);
             app.manage(SharedState(Arc::new(Mutex::new(initial_state))));
             app.manage(SharedRuntime(Arc::new(Mutex::new(RuntimeState::default()))));
             let dependency_state = Arc::new(Mutex::new(DependencyRuntimeState {
@@ -2022,11 +2195,11 @@ pub fn run() {
 
             if let Some(state) = app.try_state::<SharedState>() {
                 if let Ok(locked) = state.0.lock() {
-                    emit_queue_updated(&app.app_handle(), &locked);
+                    emit_queue_updated(app.app_handle(), &locked);
                 }
             }
             emit_dependency_status(
-                &app.app_handle(),
+                app.app_handle(),
                 &DependencyBootstrapStatus {
                     in_progress: true,
                     phase: "preparing".to_string(),
@@ -2057,6 +2230,23 @@ pub fn run() {
             open_folder,
             open_external_url
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::Destroyed = event {
+                // Send shutdown signal to worker thread when the window is destroyed.
+                let app = window.app_handle();
+                if let Some(runtime) = app.try_state::<SharedRuntime>() {
+                    if let Ok(mut rt) = runtime.0.lock() {
+                        if let Some(tx) = rt.shutdown_tx.take() {
+                            let _ = tx.send(());
+                            eprintln!("[STABILITY] Sent shutdown signal to worker thread");
+                        }
+                    }
+                }
+            }
+        });
+
+    if let Err(e) = builder.run(tauri::generate_context!()) {
+        eprintln!("[FATAL] Tauri initialization failed: {:?}", e);
+        std::process::exit(1);
+    }
 }
