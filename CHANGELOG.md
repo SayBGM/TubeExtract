@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Data Integrity & Corruption Recovery (SPEC-STABILITY-002)**
+  - Atomic file write operations to prevent data corruption during application crashes
+  - Queue file corruption recovery: automatically restores from backup with user notification via `queue-corruption-recovered` event
+  - Settings file corruption recovery: automatically restores from backup with user notification via `settings-corruption-recovered` event
+  - Cross-device atomic download completion: `.incomplete` marker pattern prevents corrupt downloads on different volumes/partitions
+  - Startup scan for incomplete file transfers: detects orphaned `.incomplete` markers and marks affected queue items as failed for retry
+
 ### Fixed
 
 - **Rust Backend Stability Improvements (SPEC-STABILITY-001)**
