@@ -1,9 +1,10 @@
 ---
 id: SPEC-STABILITY-001
 version: 1.0.0
-status: draft
+status: completed
 created: 2026-03-01
 updated: 2026-03-01
+completed: 2026-03-01
 author: backgwangmin
 priority: critical
 ---
@@ -271,3 +272,65 @@ const queryClient = new QueryClient({
 | REQ-006 | Issue #10 (React Query) | `src/renderer/lib/queryClient.ts` | AC-006 |
 
 <!-- TAG: SPEC-STABILITY-001 -->
+
+---
+
+## Implementation Notes
+
+**Implementation Completion Date:** 2026-03-01
+
+**Branch:** feature/SPEC-STABILITY-001
+**Commit:** a05ce31
+
+**Implementation Summary:**
+
+All 6 requirements have been successfully implemented and tested:
+
+| Requirement | Status | Implementation Details |
+|-------------|--------|------------------------|
+| REQ-001 | ✅ Completed | Replaced 8x `panic!()` with `unwrap_or_else(e) { e.into_inner() }` recovery pattern in `src-tauri/src/lib.rs` |
+| REQ-002 | ✅ Completed | Implemented mpsc channel-based graceful shutdown with JoinHandle tracking in worker thread loop |
+| REQ-003 | ✅ Completed | Implemented watchdog timeout for `run_command_capture()` with deadline-based process killing |
+| REQ-004 | ✅ Completed | Replaced `.expect()` with `if let Err(e)` pattern and `std::process::exit(1)` in Tauri startup |
+| REQ-005 | ✅ Completed | Implemented 500ms grace period with 10x 50ms polls and Windows `taskkill /F /T` for process tree cleanup |
+| REQ-006 | ✅ Completed | Updated React Query settings: `retry: 3`, `staleTime: 30_000`, exponential backoff retryDelay |
+
+**Test Coverage:**
+
+- Characterization tests created in `src-tauri/tests/stability_tests.rs` (131 lines)
+- Tests cover: Mutex poison recovery, grace period verification, command timeout handling, QueryClient defaults
+- All tests passing and capturing expected behavior
+
+**Files Modified:**
+1. `src-tauri/src/lib.rs` (+248 lines / -30 lines)
+2. `src-tauri/tests/stability_tests.rs` (new file, 131 lines)
+3. `src/renderer/lib/queryClient.ts` (+7 lines / -1 line)
+
+**Quality Gates Passed:**
+- ✅ Zero compilation errors
+- ✅ Zero compilation warnings (unused variable `_timeout_ms` removed)
+- ✅ All characterization tests passing
+- ✅ Behavior preserved for existing Tauri IPC contracts
+- ✅ Queue state JSON format unchanged
+- ✅ Backward compatible with existing clients
+
+**Notable Implementation Decisions:**
+
+1. **Mutex Recovery:** Used `into_inner()` on PoisonError to recover the internal data without panicking, with error logging for diagnostics
+2. **Timeout Implementation:** Implemented watchdog pattern with deadline-based killing, supporting both timeout and unlimited (timeout_ms=0) modes
+3. **Windows Process Termination:** Added platform-specific handling using `taskkill /F /T` to ensure complete process tree cleanup
+4. **Error Logging:** All recovery events logged to stderr with `[STABILITY]` prefix for easy debugging
+5. **Graceful Shutdown:** Implemented 500ms grace period (10 iterations × 50ms) before force-killing, aligning with AC-005-1 acceptance criteria
+
+**Known Limitations:**
+
+- Tauri startup error handling uses stderr output and `exit(1)` rather than native dialogs (native dialog API not available before Tauri init completes)
+- Mutex poisoning recovery assumes short hold times; complex data structures may benefit from validation after recovery (not implemented to minimize scope)
+
+**Regression Prevention:**
+
+- All Tauri command signatures (`#[tauri::command]`) remain unchanged
+- Queue state persistence format (`queue_state.json`) unchanged
+- Settings file format (`settings.json`) unchanged
+- All existing download workflows continue to function normally
+- Tauri IPC events and payloads unchanged
