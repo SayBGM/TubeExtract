@@ -119,6 +119,7 @@ struct AppSettings {
     download_dir: String,
     max_retries: i32,
     language: String,
+    max_concurrent_downloads: i32,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -183,13 +184,14 @@ struct PersistedSettings {
     download_dir: Option<String>,
     max_retries: Option<i32>,
     language: Option<String>,
+    max_concurrent_downloads: Option<i32>,
 }
 
 #[derive(Debug, Clone)]
 struct AppState {
     queue: Vec<QueueItem>,
     settings: AppSettings,
-    active_job_id: Option<String>,
+    active_worker_count: usize,
 }
 
 #[derive(Clone)]
@@ -197,18 +199,19 @@ struct SharedState(Arc<Mutex<AppState>>);
 
 #[derive(Clone)]
 struct ActiveProcess {
+    #[allow(dead_code)]
     job_id: String,
     child: Arc<Mutex<Child>>,
 }
 
 #[derive(Default)]
 struct RuntimeState {
-    active_process: Option<ActiveProcess>,
-    // Shutdown sender for graceful worker thread termination.
-    // None until a worker thread is started.
-    shutdown_tx: Option<std::sync::mpsc::Sender<()>>,
-    // Handle for the worker thread.
-    worker_handle: Option<std::thread::JoinHandle<()>>,
+    active_processes: std::collections::HashMap<String, ActiveProcess>,
+    // Shutdown senders for graceful worker thread termination.
+    // One entry per active worker thread.
+    shutdown_txs: Vec<std::sync::mpsc::Sender<()>>,
+    // Handles for worker threads.
+    worker_handles: Vec<std::thread::JoinHandle<()>>,
 }
 
 #[derive(Clone)]
@@ -232,6 +235,7 @@ fn default_settings() -> AppSettings {
             .to_string(),
         max_retries: 3,
         language: "ko".to_string(),
+        max_concurrent_downloads: 2,
     }
 }
 
@@ -916,6 +920,9 @@ fn apply_persisted_settings(state: &mut AppState, parsed: PersistedSettings) {
     if let Some(language) = parsed.language {
         state.settings.language = language;
     }
+    if let Some(max_concurrent) = parsed.max_concurrent_downloads {
+        state.settings.max_concurrent_downloads = max_concurrent.clamp(1, 3);
+    }
 }
 
 /// Loads settings with backup recovery per SPEC-STABILITY-002 REQ-003.
@@ -1398,12 +1405,19 @@ fn handle_download_output_line(shared: &Arc<Mutex<AppState>>, app: &AppHandle, j
 }
 
 fn kill_active_child_unchecked(runtime: &Arc<Mutex<RuntimeState>>) {
-    let child = runtime
+    // Kill all active processes (multi-worker support)
+    let children: Vec<Arc<Mutex<Child>>> = runtime
         .lock()
         .ok()
-        .and_then(|mut guard| guard.active_process.take())
-        .map(|active| active.child);
-    if let Some(child) = child {
+        .map(|mut guard| {
+            guard
+                .active_processes
+                .drain()
+                .map(|(_, active)| active.child)
+                .collect()
+        })
+        .unwrap_or_default();
+    for child in children {
         if let Ok(mut locked_child) = child.lock() {
             terminate_child_with_grace_period(&mut locked_child);
         }
@@ -1473,14 +1487,7 @@ fn terminate_child_with_grace_period(child: &mut Child) {
 
 fn clear_active_process(runtime: &Arc<Mutex<RuntimeState>>, job_id: &str) {
     if let Ok(mut guard) = runtime.lock() {
-        if guard
-            .active_process
-            .as_ref()
-            .map(|active| active.job_id == job_id)
-            .unwrap_or(false)
-        {
-            guard.active_process = None;
-        }
+        guard.active_processes.remove(job_id);
     }
 }
 
@@ -1490,10 +1497,11 @@ fn start_worker_if_needed(app: AppHandle, shared: Arc<Mutex<AppState>>, runtime:
     eprintln!("[STABILITY] Mutex poisoned, recovering: {:?}", e);
     e.into_inner()
 });
-        if state.active_job_id.is_some() {
+        let max_concurrent = state.settings.max_concurrent_downloads.clamp(1, 3) as usize;
+        if state.active_worker_count >= max_concurrent {
             false
         } else if state.queue.iter().any(|item| item.status == "queued") {
-            state.active_job_id = Some("worker".to_string());
+            state.active_worker_count += 1;
             true
         } else {
             false
@@ -1511,7 +1519,7 @@ fn start_worker_if_needed(app: AppHandle, shared: Arc<Mutex<AppState>>, runtime:
             eprintln!("[STABILITY] Runtime mutex poisoned, recovering: {:?}", e);
             e.into_inner()
         });
-        rt.shutdown_tx = Some(shutdown_tx);
+        rt.shutdown_txs.push(shutdown_tx);
     }
 
     // Clone runtime Arc so the closure can own one reference and we keep another for handle storage.
@@ -1522,6 +1530,11 @@ fn start_worker_if_needed(app: AppHandle, shared: Arc<Mutex<AppState>>, runtime:
         // Check for shutdown signal before processing the next job.
         if shutdown_rx.try_recv().is_ok() {
             eprintln!("[STABILITY] Worker thread received shutdown signal; exiting");
+            let mut state = shared.lock().unwrap_or_else(|e| {
+                eprintln!("[STABILITY] Mutex poisoned on shutdown, recovering");
+                e.into_inner()
+            });
+            state.active_worker_count = state.active_worker_count.saturating_sub(1);
             return;
         }
         let current_job = {
@@ -1537,7 +1550,7 @@ fn start_worker_if_needed(app: AppHandle, shared: Arc<Mutex<AppState>>, runtime:
                 emit_queue_updated(&app, &state);
                 Some(job)
             } else {
-                state.active_job_id = None;
+                state.active_worker_count = state.active_worker_count.saturating_sub(1);
                 emit_queue_updated(&app, &state);
                 None
             }
@@ -1656,7 +1669,7 @@ fn start_worker_if_needed(app: AppHandle, shared: Arc<Mutex<AppState>>, runtime:
     eprintln!("[STABILITY] Runtime mutex poisoned, recovering: {:?}", e);
     e.into_inner()
 });
-                        guard.active_process = Some(ActiveProcess {
+                        guard.active_processes.insert(job.id.clone(), ActiveProcess {
                             job_id: job.id.clone(),
                             child: child_arc.clone(),
                         });
@@ -1780,7 +1793,7 @@ fn start_worker_if_needed(app: AppHandle, shared: Arc<Mutex<AppState>>, runtime:
             eprintln!("[STABILITY] Runtime mutex poisoned, recovering: {:?}", e);
             e.into_inner()
         });
-        rt.worker_handle = Some(handle);
+        rt.worker_handles.push(handle);
     }
 }
 
@@ -2146,6 +2159,7 @@ async fn set_settings(app: AppHandle, state: State<'_, SharedState>, settings: A
         download_dir: normalize_download_dir(&settings.download_dir),
         max_retries: settings.max_retries.clamp(0, 10),
         language: settings.language,
+        max_concurrent_downloads: settings.max_concurrent_downloads.clamp(1, 3),
     };
     persist_settings(&app, &state.settings);
     Ok(())
@@ -2403,7 +2417,7 @@ pub fn run() {
             let mut initial_state = AppState {
                 queue: Vec::new(),
                 settings: default_settings(),
-                active_job_id: None,
+                active_worker_count: 0,
             };
             load_settings_with_recovery(app.app_handle(), &mut initial_state);
             load_queue_with_recovery(app.app_handle(), &mut initial_state);
@@ -2456,14 +2470,15 @@ pub fn run() {
         ])
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Destroyed = event {
-                // Send shutdown signal to worker thread when the window is destroyed.
+                // Send shutdown signal to all worker threads when the window is destroyed.
                 let app = window.app_handle();
                 if let Some(runtime) = app.try_state::<SharedRuntime>() {
                     if let Ok(mut rt) = runtime.0.lock() {
-                        if let Some(tx) = rt.shutdown_tx.take() {
+                        let txs: Vec<_> = rt.shutdown_txs.drain(..).collect();
+                        for tx in txs {
                             let _ = tx.send(());
-                            eprintln!("[STABILITY] Sent shutdown signal to worker thread");
                         }
+                        eprintln!("[STABILITY] Sent shutdown signal to {} worker thread(s)", rt.worker_handles.len());
                     }
                 }
             }
