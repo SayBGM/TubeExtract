@@ -26,6 +26,8 @@ const TEMP_DOWNLOADS_DIR: &str = "tmp-downloads";
 const QUEUE_FILE: &str = "queue_state.json";
 const SETTINGS_FILE: &str = "settings.json";
 const RETRY_DELAY_TABLE_MS: [u64; 4] = [2000, 5000, 10000, 15000];
+const RETRY_DELAY_RATE_LIMIT_MS: [u64; 4] = [30_000, 60_000, 120_000, 120_000];
+const RETRY_DELAY_NETWORK_MS: [u64; 4] = [1_000, 2_000, 5_000, 10_000];
 const MANAGED_BIN_DIR: &str = "bin";
 const DIAGNOSTICS_COMMAND_TIMEOUT_MS: u64 = 10_000;
 const ANALYZE_TIMEOUT_MS: u64 = 15_000;
@@ -1055,9 +1057,65 @@ fn load_queue_with_recovery(app: &AppHandle, state: &mut AppState) {
     }
 }
 
+#[allow(dead_code)]
 fn retry_delay_ms(attempt: usize) -> u64 {
     let idx = attempt.min(RETRY_DELAY_TABLE_MS.len().saturating_sub(1));
     RETRY_DELAY_TABLE_MS[idx]
+}
+
+// @MX:NOTE: Error classification for smart retry strategy (SPEC-STABILITY-005).
+// Pure function: no side effects. Converts raw yt-dlp error strings into a
+// RetryStrategy that determines whether and how quickly to retry a download.
+#[derive(Debug, PartialEq)]
+pub enum RetryStrategy {
+    NoRetry,
+    RateLimit,
+    NetworkError,
+    Default,
+}
+
+pub fn classify_download_error(error: &str) -> RetryStrategy {
+    let lower = error.to_lowercase();
+    // Permanent errors — no retry
+    if lower.contains("video unavailable")
+        || lower.contains("private video")
+        || lower.contains("has been removed")
+        || lower.contains("not available")
+        || lower.contains("http error 404")
+        || lower.contains("http error 403")
+        || lower.contains("age-restricted")
+        || lower.contains("this video is private")
+        || lower.contains("members-only")
+    {
+        return RetryStrategy::NoRetry;
+    }
+    // Rate-limit errors — long delays
+    if lower.contains("http error 429")
+        || lower.contains("too many requests")
+        || lower.contains("rate limit")
+    {
+        return RetryStrategy::RateLimit;
+    }
+    // Transient network errors — short delays
+    if lower.contains("connection refused")
+        || lower.contains("network is unreachable")
+        || lower.contains("name or service not known")
+        || lower.contains("timed out")
+        || (lower.contains("socket") && !lower.contains("http error 40"))
+    {
+        return RetryStrategy::NetworkError;
+    }
+    RetryStrategy::Default
+}
+
+pub fn retry_delay_ms_for_strategy(strategy: &RetryStrategy, attempt: usize) -> u64 {
+    let table = match strategy {
+        RetryStrategy::RateLimit => &RETRY_DELAY_RATE_LIMIT_MS,
+        RetryStrategy::NetworkError => &RETRY_DELAY_NETWORK_MS,
+        _ => &RETRY_DELAY_TABLE_MS,
+    };
+    let idx = attempt.min(table.len().saturating_sub(1));
+    table[idx]
 }
 
 fn remove_directory_safe(path: &Path) {
@@ -1733,6 +1791,7 @@ fn start_worker_if_needed(app: AppHandle, shared: Arc<Mutex<AppState>>, runtime:
             };
 
             let mut should_retry = false;
+            let mut should_retry_strategy = RetryStrategy::Default;
             {
                 let mut state = shared.lock().unwrap_or_else(|e| {
     eprintln!("[STABILITY] Mutex poisoned, recovering: {:?}", e);
@@ -1759,9 +1818,13 @@ fn start_worker_if_needed(app: AppHandle, shared: Arc<Mutex<AppState>>, runtime:
                         }
                     } else {
                         let fallback = process_error.unwrap_or_else(|| "다운로드 실패".to_string());
-                        item.error_message = Some(fallback);
-                        if attempt < max_retries {
+                        item.error_message = Some(fallback.clone());
+                        let strategy = classify_download_error(&fallback);
+                        if strategy == RetryStrategy::NoRetry {
+                            item.status = "failed".to_string();
+                        } else if attempt < max_retries {
                             should_retry = true;
+                            should_retry_strategy = strategy;
                             item.retry_count = (attempt + 1) as i32;
                             item.status = "queued".to_string();
                             item.speed_text = None;
@@ -1777,7 +1840,9 @@ fn start_worker_if_needed(app: AppHandle, shared: Arc<Mutex<AppState>>, runtime:
 
             if should_retry {
                 attempt += 1;
-                std::thread::sleep(Duration::from_millis(retry_delay_ms(attempt)));
+                std::thread::sleep(Duration::from_millis(
+                    retry_delay_ms_for_strategy(&should_retry_strategy, attempt),
+                ));
                 continue;
             }
             break;
