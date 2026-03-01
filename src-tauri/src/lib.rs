@@ -1290,7 +1290,7 @@ fn select_format_expression(mode: &DownloadMode, quality_id: &str) -> String {
             if quality_id.contains('+') {
                 quality_id.to_string()
             } else {
-                format!("{quality_id}+bestaudio/best")
+                format!("{quality_id}+bestaudio/best[acodec!=none]/best")
             }
         }
     }
