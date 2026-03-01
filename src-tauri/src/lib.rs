@@ -866,28 +866,47 @@ fn normalize_download_dir(raw_path: &str) -> String {
     raw.to_string()
 }
 
+/// Atomically writes `content` to `path` using a temp-file + rename strategy.
+/// On POSIX systems the rename is atomic. On Windows it is near-atomic.
+// @MX:NOTE: [AUTO] Atomic write via temp-file + rename. POSIX atomic; near-atomic on Windows.
+fn write_atomic(path: &std::path::Path, content: &str) -> Result<(), String> {
+    let tmp_path = PathBuf::from(format!("{}.tmp", path.display()));
+    fs::write(&tmp_path, content).map_err(|e| e.to_string())?;
+    fs::rename(&tmp_path, path).map_err(|e| {
+        let _ = fs::remove_file(&tmp_path);
+        e.to_string()
+    })?;
+    Ok(())
+}
+
+/// Persists the current queue to disk atomically, writing a backup after success.
+// @MX:ANCHOR: [AUTO] All queue state persisted through this function. fan_in=8.
+// @MX:REASON: [AUTO] High fan_in: cancel_job, pause_job, resume_job, enqueue_job, download worker, clear_terminal_jobs use this path.
 fn persist_queue(app: &AppHandle, state: &AppState) {
     let path = queue_file_path(app);
     if let Ok(serialized) = serde_json::to_string_pretty(&state.queue) {
-        let _ = fs::write(path, serialized);
+        if write_atomic(&path, &serialized).is_ok() {
+            // Write backup after successful primary write
+            let bak_path = PathBuf::from(format!("{}.bak", path.display()));
+            let _ = write_atomic(&bak_path, &serialized);
+        }
     }
 }
 
+/// Persists settings to disk atomically, writing a backup after success.
 fn persist_settings(app: &AppHandle, settings: &AppSettings) {
     let path = settings_file_path(app);
     if let Ok(serialized) = serde_json::to_string_pretty(settings) {
-        let _ = fs::write(path, serialized);
+        if write_atomic(&path, &serialized).is_ok() {
+            // Write backup after successful primary write
+            let bak_path = PathBuf::from(format!("{}.bak", path.display()));
+            let _ = write_atomic(&bak_path, &serialized);
+        }
     }
 }
 
-fn load_settings(app: &AppHandle, state: &mut AppState) {
-    let path = settings_file_path(app);
-    let Ok(content) = fs::read_to_string(path) else {
-        return;
-    };
-    let Ok(parsed) = serde_json::from_str::<PersistedSettings>(&content) else {
-        return;
-    };
+/// Applies a successfully-parsed PersistedSettings into state.
+fn apply_persisted_settings(state: &mut AppState, parsed: PersistedSettings) {
     if let Some(download_dir) = parsed.download_dir {
         state.settings.download_dir = normalize_download_dir(&download_dir);
     }
@@ -899,15 +918,65 @@ fn load_settings(app: &AppHandle, state: &mut AppState) {
     }
 }
 
-fn load_queue(app: &AppHandle, state: &mut AppState) {
-    let path = queue_file_path(app);
-    let Ok(content) = fs::read_to_string(path) else {
-        return;
-    };
-    let Ok(mut parsed) = serde_json::from_str::<Vec<QueueItem>>(&content) else {
-        return;
-    };
-    for item in &mut parsed {
+/// Loads settings with backup recovery per SPEC-STABILITY-002 REQ-003.
+// @MX:NOTE: [AUTO] Replaces load_settings. Adds backup recovery and corruption events per SPEC-STABILITY-002.
+fn load_settings_with_recovery(app: &AppHandle, state: &mut AppState) {
+    let path = settings_file_path(app);
+    let bak_path = PathBuf::from(format!("{}.bak", path.display()));
+
+    match fs::read_to_string(&path) {
+        Err(_) => {
+            // File missing: use defaults, no events emitted
+        }
+        Ok(content) => {
+            match serde_json::from_str::<PersistedSettings>(&content) {
+                Ok(parsed) => {
+                    // Valid: apply settings and write backup
+                    apply_persisted_settings(state, parsed);
+                    if let Ok(serialized) = serde_json::to_string_pretty(&state.settings) {
+                        let _ = write_atomic(&bak_path, &serialized);
+                    }
+                }
+                Err(parse_err) => {
+                    // Corrupt: try backup
+                    match fs::read_to_string(&bak_path) {
+                        Ok(bak_content) => {
+                            match serde_json::from_str::<PersistedSettings>(&bak_content) {
+                                Ok(bak_parsed) => {
+                                    // Backup valid: restore from backup
+                                    apply_persisted_settings(state, bak_parsed);
+                                    // Rewrite primary from restored settings
+                                    if let Ok(serialized) = serde_json::to_string_pretty(&state.settings) {
+                                        let _ = write_atomic(&path, &serialized);
+                                    }
+                                    let _ = app.emit("settings-corruption-recovered", serde_json::json!({
+                                        "message": "Settings restored from backup"
+                                    }));
+                                }
+                                Err(_) => {
+                                    // Backup also corrupt: use defaults
+                                    let _ = app.emit("settings-corruption-unrecoverable", serde_json::json!({
+                                        "error": parse_err.to_string()
+                                    }));
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            // No backup: use defaults
+                            let _ = app.emit("settings-corruption-unrecoverable", serde_json::json!({
+                                "error": parse_err.to_string()
+                            }));
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Normalizes queue items after loading: resets downloading→queued, fills missing logs.
+fn normalize_queue_items(items: &mut [QueueItem]) {
+    for item in items.iter_mut() {
         if item.status == "downloading" {
             item.status = "queued".to_string();
         }
@@ -915,7 +984,68 @@ fn load_queue(app: &AppHandle, state: &mut AppState) {
             item.download_log = Some(Vec::new());
         }
     }
-    state.queue = parsed;
+}
+
+/// Loads the queue with backup recovery per SPEC-STABILITY-002 REQ-001.
+// @MX:NOTE: [AUTO] Replaces load_queue. Adds backup recovery and corruption events per SPEC-STABILITY-002.
+fn load_queue_with_recovery(app: &AppHandle, state: &mut AppState) {
+    let path = queue_file_path(app);
+    let bak_path = PathBuf::from(format!("{}.bak", path.display()));
+
+    match fs::read_to_string(&path) {
+        Err(_) => {
+            // File missing: empty queue, no events
+        }
+        Ok(content) => {
+            match serde_json::from_str::<Vec<QueueItem>>(&content) {
+                Ok(mut parsed) => {
+                    // Valid: normalize items, write backup
+                    normalize_queue_items(&mut parsed);
+                    let backup_count = parsed.len();
+                    state.queue = parsed;
+                    if let Ok(serialized) = serde_json::to_string_pretty(&state.queue) {
+                        let _ = write_atomic(&bak_path, &serialized);
+                    }
+                    let _ = backup_count; // suppress unused warning if needed
+                }
+                Err(parse_err) => {
+                    // Corrupt: try backup
+                    match fs::read_to_string(&bak_path) {
+                        Ok(bak_content) => {
+                            match serde_json::from_str::<Vec<QueueItem>>(&bak_content) {
+                                Ok(mut bak_parsed) => {
+                                    // Backup valid: restore
+                                    normalize_queue_items(&mut bak_parsed);
+                                    let backup_item_count = bak_parsed.len();
+                                    state.queue = bak_parsed;
+                                    // Rewrite primary from restored queue
+                                    if let Ok(serialized) = serde_json::to_string_pretty(&state.queue) {
+                                        let _ = write_atomic(&path, &serialized);
+                                    }
+                                    let _ = app.emit("queue-corruption-recovered", serde_json::json!({
+                                        "backup_item_count": backup_item_count,
+                                        "message": "Queue restored from backup"
+                                    }));
+                                }
+                                Err(_) => {
+                                    // Backup also corrupt: empty queue
+                                    let _ = app.emit("queue-corruption-unrecoverable", serde_json::json!({
+                                        "error": parse_err.to_string()
+                                    }));
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            // No backup: empty queue
+                            let _ = app.emit("queue-corruption-unrecoverable", serde_json::json!({
+                                "error": parse_err.to_string()
+                            }));
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn retry_delay_ms(attempt: usize) -> u64 {
@@ -927,7 +1057,12 @@ fn remove_directory_safe(path: &Path) {
     let _ = fs::remove_dir_all(path);
 }
 
-fn move_file_with_fallback(source: &Path, destination: &Path) -> Result<(), String> {
+/// Moves a file atomically.
+/// Same-FS: uses fs::rename (atomic). Cross-device: writes .incomplete marker,
+/// copies, verifies size, removes marker, removes source.
+// @MX:WARN: [AUTO] Cross-device copy is NOT atomic. Incomplete marker guards against power loss corruption.
+// @MX:REASON: [AUTO] See SPEC-STABILITY-002 REQ-002 for incomplete marker protocol.
+fn move_file_atomic(source: &Path, destination: &Path) -> Result<(), String> {
     if let Some(parent) = destination.parent() {
         fs::create_dir_all(parent).map_err(|err| err.to_string())?;
     }
@@ -941,7 +1076,45 @@ fn move_file_with_fallback(source: &Path, destination: &Path) -> Result<(), Stri
             if !is_cross_device {
                 return Err(err.to_string());
             }
-            fs::copy(source, destination).map_err(|copy_err| copy_err.to_string())?;
+            // Cross-device: use .incomplete marker for crash safety
+            let incomplete_path = PathBuf::from(format!("{}.incomplete", destination.display()));
+            // Write marker (content is minimal JSON for diagnostics)
+            let started_at = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let marker_content = serde_json::json!({
+                "started_at": started_at,
+                "source": source.display().to_string()
+            });
+            {
+                let mut f = fs::File::create(&incomplete_path)
+                    .map_err(|e| format!("Failed to create .incomplete marker: {e}"))?;
+                f.write_all(marker_content.to_string().as_bytes())
+                    .map_err(|e| e.to_string())?;
+            }
+
+            // Copy source → destination
+            let copied_bytes = fs::copy(source, destination)
+                .map_err(|copy_err| {
+                    // Leave .incomplete marker so startup scan can detect it
+                    format!("Copy failed: {copy_err}")
+                })?;
+
+            // Verify size matches
+            let source_size = fs::metadata(source)
+                .map(|m| m.len())
+                .unwrap_or(0);
+            if source_size > 0 && copied_bytes != source_size {
+                return Err(format!(
+                    "Size mismatch after copy: expected {source_size} bytes, got {copied_bytes}"
+                ));
+            }
+
+            // Remove .incomplete marker (transfer complete)
+            let _ = fs::remove_file(&incomplete_path);
+
+            // Remove source
             fs::remove_file(source).map_err(|remove_err| remove_err.to_string())?;
             Ok(())
         }
@@ -981,6 +1154,47 @@ fn resolve_downloaded_file_path(temp_dir: &Path, expected_ext: &str) -> Result<P
 
     candidates.sort_by(|a, b| b.1.cmp(&a.1));
     Ok(candidates[0].0.clone())
+}
+
+/// Scans the download directory for `.incomplete` marker files at startup.
+/// For each marker: finds matching queue item by output_path, marks it failed,
+/// then removes the marker regardless of whether a matching item was found.
+fn scan_incomplete_markers(app: &AppHandle, state: &mut AppState) {
+    let download_dir = PathBuf::from(&state.settings.download_dir);
+    let entries = match fs::read_dir(&download_dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        if !name.ends_with(".incomplete") {
+            continue;
+        }
+        // Derive the intended destination path by stripping ".incomplete"
+        let dest_str = name.trim_end_matches(".incomplete");
+        let dest_path = download_dir.join(dest_str);
+        let dest_str_full = dest_path.to_string_lossy().to_string();
+
+        // Find a matching queue item by output_path
+        if let Some(item) = state
+            .queue
+            .iter_mut()
+            .find(|i| i.output_path.as_deref() == Some(&dest_str_full))
+        {
+            item.status = "failed".to_string();
+            item.error_message = Some(
+                "Transfer incomplete - file may be corrupted. Please retry.".to_string(),
+            );
+        }
+        // Remove the .incomplete marker regardless of match
+        let _ = fs::remove_file(&path);
+    }
+    // Emit event to surface the updated queue state if app handle is available
+    let _ = app.emit("queue-updated", serde_json::json!({}));
 }
 
 fn normalize_youtube_video_url(raw_url: &str) -> String {
@@ -1507,7 +1721,7 @@ fn start_worker_if_needed(app: AppHandle, shared: Arc<Mutex<AppState>>, runtime:
                     } else if process_ok {
                         let expected_ext = expected_extension(&job.mode);
                         let move_result = resolve_downloaded_file_path(&temp_dir, expected_ext)
-                            .and_then(|completed_path| move_file_with_fallback(&completed_path, &final_output_path));
+                            .and_then(|completed_path| move_file_atomic(&completed_path, &final_output_path));
                         match move_result {
                             Ok(()) => {
                                 item.status = "completed".to_string();
@@ -1965,28 +2179,27 @@ async fn run_diagnostics(
         yt_dlp_available: yt_ok,
         ffmpeg_available: ff_ok,
         download_path_writable: writable,
-        message: format!(
-            "yt-dlp: {}{}{}, ffmpeg: {}{}{}, download-dir writable: {}{}",
-            if yt_ok { "OK" } else { "FAIL" },
-            if yt_ok {
-                "".to_string()
+        message: {
+            let yt_status = if yt_ok { "OK" } else { "FAIL" };
+            let yt_detail = if yt_ok {
+                String::new()
             } else {
                 format!(" ({})", truncate_reason(&yt_reason))
-            },
-            format!(" ({yt_dlp})"),
-            if ff_ok { "OK" } else { "FAIL" },
-            if ff_ok {
-                "".to_string()
+            };
+            let ff_status = if ff_ok { "OK" } else { "FAIL" };
+            let ff_detail = if ff_ok {
+                String::new()
             } else {
                 format!(" ({})", truncate_reason(&ff_reason))
-            },
-            format!(" ({ffmpeg})"),
-            if writable { "OK" } else { "FAIL" }
-            ,
-            dependency_error_message
+            };
+            let writable_status = if writable { "OK" } else { "FAIL" };
+            let bootstrap_detail = dependency_error_message
                 .map(|message| format!(", bootstrap: {message}"))
-                .unwrap_or_default()
-        ),
+                .unwrap_or_default();
+            format!(
+                "yt-dlp: {yt_status}{yt_detail} ({yt_dlp}), ffmpeg: {ff_status}{ff_detail} ({ffmpeg}), download-dir writable: {writable_status}{bootstrap_detail}"
+            )
+        },
     })
 }
 
@@ -2182,8 +2395,9 @@ pub fn run() {
                 settings: default_settings(),
                 active_job_id: None,
             };
-            load_settings(app.app_handle(), &mut initial_state);
-            load_queue(app.app_handle(), &mut initial_state);
+            load_settings_with_recovery(app.app_handle(), &mut initial_state);
+            load_queue_with_recovery(app.app_handle(), &mut initial_state);
+            scan_incomplete_markers(app.app_handle(), &mut initial_state);
             app.manage(SharedState(Arc::new(Mutex::new(initial_state))));
             app.manage(SharedRuntime(Arc::new(Mutex::new(RuntimeState::default()))));
             let dependency_state = Arc::new(Mutex::new(DependencyRuntimeState {
