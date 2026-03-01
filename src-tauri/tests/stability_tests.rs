@@ -661,3 +661,90 @@ fn test_max_concurrent_downloads_clamping() {
     assert_eq!(3_i32.clamp(1, 3), 3, "3 should stay 3");
     assert_eq!((-1_i32).clamp(1, 3), 1, "negative should clamp to 1");
 }
+
+// =============================================================================
+// SPEC-STABILITY-005: Smart Retry Strategy
+// Tests for error classification and strategy-based delay selection.
+// =============================================================================
+
+use tubeextract_lib::{classify_download_error, retry_delay_ms_for_strategy, RetryStrategy};
+
+/// SPEC-STABILITY-005 REQ-001: NoRetry patterns must be classified correctly.
+#[test]
+fn test_classify_no_retry_patterns() {
+    assert_eq!(classify_download_error("Video unavailable"), RetryStrategy::NoRetry);
+    assert_eq!(classify_download_error("This is a private video"), RetryStrategy::NoRetry);
+    assert_eq!(classify_download_error("The video has been removed"), RetryStrategy::NoRetry);
+    assert_eq!(classify_download_error("This video is not available"), RetryStrategy::NoRetry);
+    assert_eq!(classify_download_error("HTTP Error 404: Not Found"), RetryStrategy::NoRetry);
+    assert_eq!(classify_download_error("HTTP Error 403: Forbidden"), RetryStrategy::NoRetry);
+    assert_eq!(classify_download_error("This video is age-restricted"), RetryStrategy::NoRetry);
+    assert_eq!(classify_download_error("This video is private"), RetryStrategy::NoRetry);
+    assert_eq!(classify_download_error("This is a members-only video"), RetryStrategy::NoRetry);
+}
+
+/// SPEC-STABILITY-005 REQ-001: RateLimit patterns must be classified correctly.
+#[test]
+fn test_classify_rate_limit_patterns() {
+    assert_eq!(classify_download_error("HTTP Error 429: Too Many Requests"), RetryStrategy::RateLimit);
+    assert_eq!(classify_download_error("Too many requests sent"), RetryStrategy::RateLimit);
+    assert_eq!(classify_download_error("rate limit exceeded"), RetryStrategy::RateLimit);
+}
+
+/// SPEC-STABILITY-005 REQ-001: NetworkError patterns must be classified correctly.
+#[test]
+fn test_classify_network_error_patterns() {
+    assert_eq!(classify_download_error("Connection refused"), RetryStrategy::NetworkError);
+    assert_eq!(classify_download_error("Network is unreachable"), RetryStrategy::NetworkError);
+    assert_eq!(classify_download_error("Name or service not known"), RetryStrategy::NetworkError);
+    assert_eq!(classify_download_error("Connection timed out"), RetryStrategy::NetworkError);
+    assert_eq!(classify_download_error("socket hang up"), RetryStrategy::NetworkError);
+}
+
+/// SPEC-STABILITY-005 REQ-005: Unclassified errors must return Default strategy.
+#[test]
+fn test_classify_default_for_unknown_errors() {
+    assert_eq!(classify_download_error("Some unknown error occurred"), RetryStrategy::Default);
+    assert_eq!(classify_download_error("ffmpeg exited with code 1"), RetryStrategy::Default);
+    assert_eq!(classify_download_error(""), RetryStrategy::Default);
+}
+
+/// SPEC-STABILITY-005 REQ-001: Socket errors containing HTTP 40x must NOT be NetworkError.
+#[test]
+fn test_classify_socket_with_http_40x_is_not_network_error() {
+    // "socket" + "http error 40x" should not classify as NetworkError
+    let err = "socket timeout due to http error 403";
+    assert_ne!(classify_download_error(err), RetryStrategy::NetworkError);
+}
+
+/// SPEC-STABILITY-005 REQ-003: RateLimit strategy uses 30s+ delay table.
+#[test]
+fn test_retry_delay_rate_limit_strategy() {
+    assert_eq!(retry_delay_ms_for_strategy(&RetryStrategy::RateLimit, 0), 30_000);
+    assert_eq!(retry_delay_ms_for_strategy(&RetryStrategy::RateLimit, 1), 60_000);
+    assert_eq!(retry_delay_ms_for_strategy(&RetryStrategy::RateLimit, 2), 120_000);
+    assert_eq!(retry_delay_ms_for_strategy(&RetryStrategy::RateLimit, 3), 120_000);
+    // Out-of-bounds attempt clamps to last entry
+    assert_eq!(retry_delay_ms_for_strategy(&RetryStrategy::RateLimit, 99), 120_000);
+}
+
+/// SPEC-STABILITY-005 REQ-004: NetworkError strategy uses 1s short delay table.
+#[test]
+fn test_retry_delay_network_error_strategy() {
+    assert_eq!(retry_delay_ms_for_strategy(&RetryStrategy::NetworkError, 0), 1_000);
+    assert_eq!(retry_delay_ms_for_strategy(&RetryStrategy::NetworkError, 1), 2_000);
+    assert_eq!(retry_delay_ms_for_strategy(&RetryStrategy::NetworkError, 2), 5_000);
+    assert_eq!(retry_delay_ms_for_strategy(&RetryStrategy::NetworkError, 3), 10_000);
+    // Out-of-bounds attempt clamps to last entry
+    assert_eq!(retry_delay_ms_for_strategy(&RetryStrategy::NetworkError, 99), 10_000);
+}
+
+/// SPEC-STABILITY-005 REQ-005: Default strategy preserves existing RETRY_DELAY_TABLE_MS.
+#[test]
+fn test_retry_delay_default_strategy_unchanged() {
+    assert_eq!(retry_delay_ms_for_strategy(&RetryStrategy::Default, 0), 2_000);
+    assert_eq!(retry_delay_ms_for_strategy(&RetryStrategy::Default, 1), 5_000);
+    assert_eq!(retry_delay_ms_for_strategy(&RetryStrategy::Default, 2), 10_000);
+    assert_eq!(retry_delay_ms_for_strategy(&RetryStrategy::Default, 3), 15_000);
+    assert_eq!(retry_delay_ms_for_strategy(&RetryStrategy::Default, 99), 15_000);
+}
