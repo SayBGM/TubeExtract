@@ -1,57 +1,48 @@
+mod dependencies;
+mod diagnostics;
+mod file_ops;
+mod state;
+mod types;
+mod utils;
+
+use crate::dependencies::{
+    default_dependency_status, emit_dependency_status, start_dependency_bootstrap_if_needed,
+    wait_for_dependencies, DependencyBootstrapStatus, DependencyRuntimeState,
+    SharedDependencyState,
+};
+use crate::diagnostics::{
+    check_update, get_storage_stats, open_external_url, open_folder, run_diagnostics,
+};
+use crate::file_ops::{
+    configure_hidden_process, managed_path_env, move_file_atomic, normalize_download_dir,
+    queue_file_path, remove_directory_safe, resolve_downloaded_file_path, resolve_executable,
+    run_command_capture, settings_file_path, temp_downloads_root_dir, temp_job_dir_path,
+    write_atomic,
+};
+use crate::state::lock_or_recover;
+use crate::types::CommandResult;
+use crate::utils::{
+    normalize_youtube_video_url, parse_eta, parse_progress_percent, parse_speed, sanitize_file_name,
+};
 use dirs::download_dir;
-use fs2::statvfs;
-use regex::Regex;
-use reqwest::blocking::Client;
 use rfd::FileDialog;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashSet;
-use std::env;
 use std::fs;
-use std::io::{BufRead, BufReader, Read, Write};
-use std::path::{Path, PathBuf};
+use std::io::{BufRead, BufReader};
+use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex, TryLockError};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager, State};
-use url::Url;
 use uuid::Uuid;
-#[cfg(target_os = "windows")]
-use std::os::windows::process::CommandExt;
-
-type CommandResult<T> = Result<T, String>;
 
 const MAX_LOG_LINES_PER_JOB: usize = 120;
-const TEMP_DOWNLOADS_DIR: &str = "tmp-downloads";
-const QUEUE_FILE: &str = "queue_state.json";
-const SETTINGS_FILE: &str = "settings.json";
 const RETRY_DELAY_TABLE_MS: [u64; 4] = [2000, 5000, 10000, 15000];
 const RETRY_DELAY_RATE_LIMIT_MS: [u64; 4] = [30_000, 60_000, 120_000, 120_000];
 const RETRY_DELAY_NETWORK_MS: [u64; 4] = [1_000, 2_000, 5_000, 10_000];
-const MANAGED_BIN_DIR: &str = "bin";
-const DIAGNOSTICS_COMMAND_TIMEOUT_MS: u64 = 10_000;
 const ANALYZE_TIMEOUT_MS: u64 = 15_000;
-const YTDLP_LATEST_API_URL: &str = "https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest";
-const YTDLP_VERSION_CHECK_TIMEOUT_MS: u64 = 5_000;
-const YTDLP_DOWNLOAD_URL_WINDOWS: &str =
-    "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe";
-const YTDLP_DOWNLOAD_URL_MACOS: &str =
-    "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos";
-const YTDLP_DOWNLOAD_URL_LINUX: &str =
-    "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux";
-#[cfg(target_os = "windows")]
-const FFMPEG_DOWNLOAD_URL_WINDOWS: &str =
-    "https://github.com/yt-dlp/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip";
-
-#[cfg(target_os = "windows")]
-const COMMON_BINARY_DIRS: &[&str] = &[
-    "C:\\Program Files\\yt-dlp",
-    "C:\\Program Files\\ffmpeg\\bin",
-    "C:\\Windows\\System32",
-];
-
-#[cfg(not(target_os = "windows"))]
-const COMMON_BINARY_DIRS: &[&str] = &["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
@@ -126,39 +117,10 @@ struct AppSettings {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct DiagnosticsResult {
-    yt_dlp_available: bool,
-    ffmpeg_available: bool,
-    download_path_writable: bool,
-    message: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct StorageStats {
-    total_bytes: u64,
-    available_bytes: u64,
-    used_bytes: u64,
-    used_percent: f64,
-    download_dir_bytes: u64,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
 struct DuplicateCheckResult {
     is_duplicate: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     existing_output_path: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct DependencyBootstrapStatus {
-    in_progress: bool,
-    phase: String,
-    progress_percent: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error_message: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -219,16 +181,6 @@ struct RuntimeState {
 #[derive(Clone)]
 struct SharedRuntime(Arc<Mutex<RuntimeState>>);
 
-#[derive(Clone)]
-struct SharedDependencyState(Arc<Mutex<DependencyRuntimeState>>);
-
-#[derive(Debug, Clone)]
-struct DependencyRuntimeState {
-    status: DependencyBootstrapStatus,
-    dependencies_ready: bool,
-    in_progress: bool,
-}
-
 fn default_settings() -> AppSettings {
     AppSettings {
         download_dir: download_dir()
@@ -253,636 +205,6 @@ fn emit_queue_updated(app: &AppHandle, state: &AppState) {
 
 fn emit_queue_updated_snapshot(app: &AppHandle, snapshot: QueueSnapshot) {
     let _ = app.emit("queue-updated", snapshot);
-}
-
-fn default_dependency_status() -> DependencyBootstrapStatus {
-    DependencyBootstrapStatus {
-        in_progress: false,
-        phase: "idle".to_string(),
-        progress_percent: None,
-        error_message: None,
-    }
-}
-
-fn emit_dependency_status(app: &AppHandle, status: &DependencyBootstrapStatus) {
-    let _ = app.emit(
-        "dependency-bootstrap-updated",
-        status.clone(),
-    );
-}
-
-fn set_dependency_status(
-    app: &AppHandle,
-    dependency: &Arc<Mutex<DependencyRuntimeState>>,
-    in_progress: bool,
-    phase: &str,
-    progress_percent: Option<i32>,
-    error_message: Option<String>,
-) {
-    let next = DependencyBootstrapStatus {
-        in_progress,
-        phase: phase.to_string(),
-        progress_percent,
-        error_message,
-    };
-
-    if let Ok(mut state) = dependency.lock() {
-        state.status = next.clone();
-    }
-    emit_dependency_status(app, &next);
-}
-
-fn app_data_dir(app: &AppHandle) -> PathBuf {
-    let fallback = download_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("tubeextract-data");
-    let path = app.path().app_data_dir().unwrap_or(fallback);
-    let _ = fs::create_dir_all(&path);
-    path
-}
-
-fn temp_downloads_root_dir(app: &AppHandle) -> PathBuf {
-    app_data_dir(app).join(TEMP_DOWNLOADS_DIR)
-}
-
-fn temp_job_dir_path(app: &AppHandle, job_id: &str) -> PathBuf {
-    temp_downloads_root_dir(app).join(job_id)
-}
-
-fn queue_file_path(app: &AppHandle) -> PathBuf {
-    app_data_dir(app).join(QUEUE_FILE)
-}
-
-fn settings_file_path(app: &AppHandle) -> PathBuf {
-    app_data_dir(app).join(SETTINGS_FILE)
-}
-
-fn managed_bin_dir_path(app: &AppHandle) -> PathBuf {
-    app_data_dir(app).join(MANAGED_BIN_DIR)
-}
-
-fn managed_executable_path(app: &AppHandle, binary_name: &str) -> PathBuf {
-    let executable_name = if cfg!(target_os = "windows") {
-        format!("{binary_name}.exe")
-    } else {
-        binary_name.to_string()
-    };
-    managed_bin_dir_path(app).join(executable_name)
-}
-
-fn bundled_executable_path(app: &AppHandle, binary_name: &str) -> Option<PathBuf> {
-    let executable_name = if cfg!(target_os = "windows") {
-        format!("{binary_name}.exe")
-    } else {
-        binary_name.to_string()
-    };
-    let resource_dir = app.path().resource_dir().ok()?;
-    let candidate = resource_dir.join("bin").join(executable_name);
-    if candidate.exists() {
-        Some(candidate)
-    } else {
-        None
-    }
-}
-
-fn binary_with_platform_extension(binary_name: &str) -> String {
-    if cfg!(target_os = "windows") {
-        format!("{binary_name}.exe")
-    } else {
-        binary_name.to_string()
-    }
-}
-
-fn resolve_executable(app: &AppHandle, binary_name: &str) -> String {
-    let managed_path = managed_executable_path(app, binary_name);
-    if managed_path.exists() {
-        return managed_path.to_string_lossy().to_string();
-    }
-    if let Some(bundled_path) = bundled_executable_path(app, binary_name) {
-        return bundled_path.to_string_lossy().to_string();
-    }
-
-    let with_ext = binary_with_platform_extension(binary_name);
-    if let Some(path_var) = env::var_os("PATH") {
-        for entry in env::split_paths(&path_var) {
-            let candidate = entry.join(&with_ext);
-            if candidate.exists() {
-                return candidate.to_string_lossy().to_string();
-            }
-        }
-    }
-
-    for base_dir in COMMON_BINARY_DIRS {
-        let candidate = PathBuf::from(base_dir).join(&with_ext);
-        if candidate.exists() {
-            return candidate.to_string_lossy().to_string();
-        }
-    }
-
-    with_ext
-}
-
-fn managed_path_env(app: &AppHandle) -> String {
-    let mut paths = Vec::new();
-    paths.push(managed_bin_dir_path(app));
-    if let Some(path_var) = env::var_os("PATH") {
-        paths.extend(env::split_paths(&path_var));
-    }
-    env::join_paths(paths)
-        .map(|joined| joined.to_string_lossy().to_string())
-        .unwrap_or_else(|_| env::var("PATH").unwrap_or_default())
-}
-
-fn configure_hidden_process(command: &mut Command) -> &mut Command {
-    #[cfg(target_os = "windows")]
-    {
-        // CREATE_NO_WINDOW
-        command.creation_flags(0x08000000);
-    }
-    command
-}
-
-#[derive(Debug)]
-struct CommandCaptureResult {
-    code: i32,
-    stdout: String,
-    stderr: String,
-    timed_out: bool,
-}
-
-fn run_command_capture(
-    app: &AppHandle,
-    command: &str,
-    args: &[&str],
-    timeout_ms: u64,
-) -> CommandCaptureResult {
-    let mut cmd = Command::new(command);
-    configure_hidden_process(&mut cmd);
-    let mut child = match cmd
-        .args(args)
-        .env("PATH", managed_path_env(app))
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-    {
-        Ok(child) => child,
-        Err(err) => {
-            return CommandCaptureResult {
-                code: 1,
-                stdout: String::new(),
-                stderr: err.to_string(),
-                timed_out: false,
-            };
-        }
-    };
-
-    // Watchdog: kill the process if timeout_ms > 0 and time is exceeded.
-    if timeout_ms > 0 {
-        let child_id = child.id();
-        let deadline = std::time::Instant::now() + Duration::from_millis(timeout_ms);
-        std::thread::spawn(move || {
-            // Poll until deadline, then attempt to kill.
-            while std::time::Instant::now() < deadline {
-                std::thread::sleep(Duration::from_millis(100));
-            }
-            // Best-effort kill by PID; the process may have already exited.
-            #[cfg(unix)]
-            {
-                let _ = Command::new("kill")
-                    .args(["-9", &child_id.to_string()])
-                    .status();
-            }
-            #[cfg(windows)]
-            {
-                let _ = Command::new("taskkill")
-                    .args(["/F", "/PID", &child_id.to_string()])
-                    .status();
-            }
-        });
-    }
-
-    // Poll for process completion.
-    let deadline = if timeout_ms > 0 {
-        Some(std::time::Instant::now() + Duration::from_millis(timeout_ms))
-    } else {
-        None
-    };
-
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => break,
-            Ok(None) => {
-                if let Some(dl) = deadline {
-                    if std::time::Instant::now() >= dl {
-                        // Timed out; collect whatever output is available and return.
-                        let stdout_bytes = child
-                            .stdout
-                            .take()
-                            .and_then(|mut s| {
-                                let mut buf = Vec::new();
-                                s.read_to_end(&mut buf).ok().map(|_| buf)
-                            })
-                            .unwrap_or_default();
-                        let stderr_bytes = child
-                            .stderr
-                            .take()
-                            .and_then(|mut s| {
-                                let mut buf = Vec::new();
-                                s.read_to_end(&mut buf).ok().map(|_| buf)
-                            })
-                            .unwrap_or_default();
-                        eprintln!("[STABILITY] Command timed out after {}ms", timeout_ms);
-                        return CommandCaptureResult {
-                            code: -1,
-                            stdout: String::from_utf8_lossy(&stdout_bytes).to_string(),
-                            stderr: String::from_utf8_lossy(&stderr_bytes).to_string(),
-                            timed_out: true,
-                        };
-                    }
-                }
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            Err(err) => {
-                return CommandCaptureResult {
-                    code: 1,
-                    stdout: String::new(),
-                    stderr: err.to_string(),
-                    timed_out: false,
-                };
-            }
-        }
-    }
-
-    // Process finished within timeout; collect output.
-    let output = match child.wait_with_output() {
-        Ok(output) => output,
-        Err(err) => {
-            return CommandCaptureResult {
-                code: 1,
-                stdout: String::new(),
-                stderr: err.to_string(),
-                timed_out: false,
-            };
-        }
-    };
-
-    CommandCaptureResult {
-        code: if output.status.success() {
-            0
-        } else {
-            output.status.code().unwrap_or(1)
-        },
-        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-        timed_out: false,
-    }
-}
-
-fn normalize_ytdlp_version(input: &str) -> String {
-    input.trim().trim_start_matches('v').to_string()
-}
-
-fn installed_ytdlp_version(app: &AppHandle, target: &Path) -> Option<String> {
-    let target_str = target.to_string_lossy().to_string();
-    let check = run_command_capture(
-        app,
-        &target_str,
-        &["--version"],
-        YTDLP_VERSION_CHECK_TIMEOUT_MS,
-    );
-    if check.code != 0 || check.timed_out {
-        return None;
-    }
-    let version = normalize_ytdlp_version(&check.stdout);
-    if version.is_empty() {
-        None
-    } else {
-        Some(version)
-    }
-}
-
-fn latest_ytdlp_version() -> Option<String> {
-    let client = Client::builder()
-        .timeout(Duration::from_millis(YTDLP_VERSION_CHECK_TIMEOUT_MS))
-        .build()
-        .ok()?;
-    let payload = client
-        .get(YTDLP_LATEST_API_URL)
-        .header("Accept", "application/vnd.github+json")
-        .header("User-Agent", "TubeExtract")
-        .send()
-        .ok()?
-        .json::<Value>()
-        .ok()?;
-    let tag = payload.get("tag_name").and_then(Value::as_str).unwrap_or_default();
-    let version = normalize_ytdlp_version(tag);
-    if version.is_empty() {
-        None
-    } else {
-        Some(version)
-    }
-}
-
-fn download_file(
-    client: &Client,
-    url: &str,
-    destination: &Path,
-    on_progress: impl Fn(u64, Option<u64>),
-) -> Result<(), String> {
-    let mut response = client
-        .get(url)
-        .header("User-Agent", "TubeExtract")
-        .send()
-        .map_err(|err| err.to_string())?;
-    if !response.status().is_success() {
-        return Err(format!("파일 다운로드 실패: {}", response.status()));
-    }
-
-    let total = response.content_length();
-    let mut file = fs::File::create(destination).map_err(|err| err.to_string())?;
-    let mut downloaded: u64 = 0;
-    let mut buffer = [0_u8; 64 * 1024];
-    loop {
-        let read = response.read(&mut buffer).map_err(|err| err.to_string())?;
-        if read == 0 {
-            break;
-        }
-        file.write_all(&buffer[..read]).map_err(|err| err.to_string())?;
-        downloaded = downloaded.saturating_add(read as u64);
-        on_progress(downloaded, total);
-    }
-    Ok(())
-}
-
-fn ensure_ytdlp(
-    app: &AppHandle,
-    dependency: &Arc<Mutex<DependencyRuntimeState>>,
-    check_latest: bool,
-) -> Result<(), String> {
-    set_dependency_status(app, dependency, true, "checking_yt_dlp", Some(15), None);
-
-    let resolved = resolve_executable(app, "yt-dlp");
-    let check_existing = run_command_capture(app, &resolved, &["--version"], YTDLP_VERSION_CHECK_TIMEOUT_MS);
-    if check_existing.code == 0 {
-        // If yt-dlp exists (bundled/system/managed), use it as-is.
-        return Ok(());
-    }
-
-    let target = managed_executable_path(app, "yt-dlp");
-    let _ = fs::create_dir_all(managed_bin_dir_path(app));
-
-    if target.exists() {
-        if !check_latest {
-            return Ok(());
-        }
-        let installed = installed_ytdlp_version(app, &target);
-        if let Some(installed_version) = installed {
-            if let Some(latest_version) = latest_ytdlp_version() {
-                if installed_version == latest_version {
-                    return Ok(());
-                }
-            } else {
-                return Ok(());
-            }
-        }
-        let _ = fs::remove_file(&target);
-    }
-
-    let download_url = if cfg!(target_os = "windows") {
-        YTDLP_DOWNLOAD_URL_WINDOWS
-    } else if cfg!(target_os = "macos") {
-        YTDLP_DOWNLOAD_URL_MACOS
-    } else {
-        YTDLP_DOWNLOAD_URL_LINUX
-    };
-
-    set_dependency_status(app, dependency, true, "downloading_yt_dlp", None, None);
-    let client = Client::builder()
-        .timeout(Duration::from_secs(180))
-        .build()
-        .map_err(|err| err.to_string())?;
-    download_file(&client, download_url, &target, |downloaded, total| {
-        if let Some(total) = total {
-            if total > 0 {
-                let ratio = (downloaded as f64 / total as f64).clamp(0.0, 1.0);
-                let progress = (20.0 + ratio * 60.0).round() as i32;
-                set_dependency_status(app, dependency, true, "downloading_yt_dlp", Some(progress), None);
-                return;
-            }
-        }
-        set_dependency_status(app, dependency, true, "downloading_yt_dlp", None, None);
-    })?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(&target, fs::Permissions::from_mode(0o755));
-    }
-    Ok(())
-}
-
-fn ensure_ffmpeg_available(
-    app: &AppHandle,
-    dependency: &Arc<Mutex<DependencyRuntimeState>>,
-) -> Result<(), String> {
-    set_dependency_status(app, dependency, true, "checking_ffmpeg", Some(86), None);
-    let ffmpeg = resolve_executable(app, "ffmpeg");
-    let result = run_command_capture(app, &ffmpeg, &["-version"], DIAGNOSTICS_COMMAND_TIMEOUT_MS);
-    if result.code == 0 {
-        return Ok(());
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        install_ffmpeg_windows(app, dependency)?;
-        set_dependency_status(app, dependency, true, "checking_ffmpeg", Some(98), None);
-        let ffmpeg = resolve_executable(app, "ffmpeg");
-        let recheck = run_command_capture(app, &ffmpeg, &["-version"], DIAGNOSTICS_COMMAND_TIMEOUT_MS);
-        if recheck.code == 0 {
-            return Ok(());
-        }
-        return Err("ffmpeg 자동 설치 후에도 실행에 실패했습니다.".to_string());
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        Err("ffmpeg를 찾지 못했습니다. 시스템에 설치 후 다시 시도해 주세요.".to_string())
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn install_ffmpeg_windows(
-    app: &AppHandle,
-    dependency: &Arc<Mutex<DependencyRuntimeState>>,
-) -> Result<(), String> {
-    use zip::ZipArchive;
-
-    set_dependency_status(app, dependency, true, "installing_ffmpeg", Some(88), None);
-
-    let managed_dir = managed_bin_dir_path(app);
-    fs::create_dir_all(&managed_dir).map_err(|err| err.to_string())?;
-    let ffmpeg_target = managed_executable_path(app, "ffmpeg");
-    let ffprobe_target = managed_executable_path(app, "ffprobe");
-    let zip_path = app_data_dir(app).join("ffmpeg-windows.zip");
-
-    let client = Client::builder()
-        .timeout(Duration::from_secs(300))
-        .build()
-        .map_err(|err| err.to_string())?;
-    download_file(&client, FFMPEG_DOWNLOAD_URL_WINDOWS, &zip_path, |downloaded, total| {
-        if let Some(total) = total {
-            if total > 0 {
-                let ratio = (downloaded as f64 / total as f64).clamp(0.0, 1.0);
-                let progress = (88.0 + ratio * 8.0).round() as i32;
-                set_dependency_status(app, dependency, true, "installing_ffmpeg", Some(progress), None);
-                return;
-            }
-        }
-        set_dependency_status(app, dependency, true, "installing_ffmpeg", None, None);
-    })?;
-
-    let zip_file = fs::File::open(&zip_path).map_err(|err| err.to_string())?;
-    let mut archive = ZipArchive::new(zip_file).map_err(|err| err.to_string())?;
-    let mut ffmpeg_installed = false;
-    let mut ffprobe_installed = false;
-
-    for idx in 0..archive.len() {
-        let mut entry = archive.by_index(idx).map_err(|err| err.to_string())?;
-        if !entry.is_file() {
-            continue;
-        }
-
-        let entry_name = entry.name().replace('\\', "/");
-        let destination = if entry_name.ends_with("/bin/ffmpeg.exe") {
-            Some(ffmpeg_target.clone())
-        } else if entry_name.ends_with("/bin/ffprobe.exe") {
-            Some(ffprobe_target.clone())
-        } else {
-            None
-        };
-
-        let Some(destination) = destination else {
-            continue;
-        };
-
-        let mut output = fs::File::create(&destination).map_err(|err| err.to_string())?;
-        std::io::copy(&mut entry, &mut output).map_err(|err| err.to_string())?;
-
-        if destination == ffmpeg_target {
-            ffmpeg_installed = true;
-        } else if destination == ffprobe_target {
-            ffprobe_installed = true;
-        }
-
-        if ffmpeg_installed && ffprobe_installed {
-            break;
-        }
-    }
-
-    let _ = fs::remove_file(&zip_path);
-
-    if !ffmpeg_installed {
-        return Err("ffmpeg 자동 설치에 실패했습니다.".to_string());
-    }
-
-    Ok(())
-}
-
-fn bootstrap_dependencies(app: &AppHandle, dependency: &Arc<Mutex<DependencyRuntimeState>>) -> Result<(), String> {
-    set_dependency_status(app, dependency, true, "preparing", Some(5), None);
-    ensure_ytdlp(app, dependency, true)?;
-    ensure_ffmpeg_available(app, dependency)?;
-    set_dependency_status(app, dependency, false, "ready", Some(100), None);
-    if let Ok(mut state) = dependency.lock() {
-        state.dependencies_ready = true;
-        state.in_progress = false;
-    }
-    Ok(())
-}
-
-fn start_dependency_bootstrap_if_needed(app: AppHandle, dependency: Arc<Mutex<DependencyRuntimeState>>) {
-    let should_start = {
-        let mut state = match dependency.lock() {
-            Ok(state) => state,
-            Err(_) => return,
-        };
-        if state.dependencies_ready || state.in_progress {
-            false
-        } else {
-            state.in_progress = true;
-            true
-        }
-    };
-
-    if !should_start {
-        return;
-    }
-
-    std::thread::spawn(move || {
-        if let Err(err) = bootstrap_dependencies(&app, &dependency) {
-            set_dependency_status(&app, &dependency, false, "failed", None, Some(err.clone()));
-            if let Ok(mut state) = dependency.lock() {
-                state.dependencies_ready = false;
-                state.in_progress = false;
-                state.status.error_message = Some(err);
-            }
-        }
-    });
-}
-
-fn wait_for_dependencies(app: &AppHandle, dependency: &Arc<Mutex<DependencyRuntimeState>>) -> Result<(), String> {
-    start_dependency_bootstrap_if_needed(app.clone(), dependency.clone());
-
-    for _ in 0..600 {
-        if let Ok(state) = dependency.lock() {
-            if state.dependencies_ready {
-                return Ok(());
-            }
-            if !state.in_progress && state.status.phase == "failed" {
-                return Err(
-                    state
-                        .status
-                        .error_message
-                        .clone()
-                        .unwrap_or_else(|| "dependency bootstrap failed".to_string()),
-                );
-            }
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
-
-    Err("의존성 준비 시간이 초과되었습니다.".to_string())
-}
-
-fn normalize_download_dir(raw_path: &str) -> String {
-    let raw = raw_path.trim();
-    if raw.is_empty() {
-        return download_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .to_string_lossy()
-            .to_string();
-    }
-    let path = PathBuf::from(raw);
-    if path.is_absolute() {
-        return raw.to_string();
-    }
-    if cfg!(not(target_os = "windows")) && raw.starts_with("Users/") {
-        return format!("/{raw}");
-    }
-    raw.to_string()
-}
-
-/// Atomically writes `content` to `path` using a temp-file + rename strategy.
-/// On POSIX systems the rename is atomic. On Windows it is near-atomic.
-// @MX:NOTE: [AUTO] Atomic write via temp-file + rename. POSIX atomic; near-atomic on Windows.
-fn write_atomic(path: &std::path::Path, content: &str) -> Result<(), String> {
-    let tmp_path = PathBuf::from(format!("{}.tmp", path.display()));
-    fs::write(&tmp_path, content).map_err(|e| e.to_string())?;
-    fs::rename(&tmp_path, path).map_err(|e| {
-        let _ = fs::remove_file(&tmp_path);
-        e.to_string()
-    })?;
-    Ok(())
 }
 
 /// Persists the current queue to disk atomically, writing a backup after success.
@@ -955,26 +277,37 @@ fn load_settings_with_recovery(app: &AppHandle, state: &mut AppState) {
                                     // Backup valid: restore from backup
                                     apply_persisted_settings(state, bak_parsed);
                                     // Rewrite primary from restored settings
-                                    if let Ok(serialized) = serde_json::to_string_pretty(&state.settings) {
+                                    if let Ok(serialized) =
+                                        serde_json::to_string_pretty(&state.settings)
+                                    {
                                         let _ = write_atomic(&path, &serialized);
                                     }
-                                    let _ = app.emit("settings-corruption-recovered", serde_json::json!({
-                                        "message": "Settings restored from backup"
-                                    }));
+                                    let _ = app.emit(
+                                        "settings-corruption-recovered",
+                                        serde_json::json!({
+                                            "message": "Settings restored from backup"
+                                        }),
+                                    );
                                 }
                                 Err(_) => {
                                     // Backup also corrupt: use defaults
-                                    let _ = app.emit("settings-corruption-unrecoverable", serde_json::json!({
-                                        "error": parse_err.to_string()
-                                    }));
+                                    let _ = app.emit(
+                                        "settings-corruption-unrecoverable",
+                                        serde_json::json!({
+                                            "error": parse_err.to_string()
+                                        }),
+                                    );
                                 }
                             }
                         }
                         Err(_) => {
                             // No backup: use defaults
-                            let _ = app.emit("settings-corruption-unrecoverable", serde_json::json!({
-                                "error": parse_err.to_string()
-                            }));
+                            let _ = app.emit(
+                                "settings-corruption-unrecoverable",
+                                serde_json::json!({
+                                    "error": parse_err.to_string()
+                                }),
+                            );
                         }
                     }
                 }
@@ -1028,27 +361,38 @@ fn load_queue_with_recovery(app: &AppHandle, state: &mut AppState) {
                                     let backup_item_count = bak_parsed.len();
                                     state.queue = bak_parsed;
                                     // Rewrite primary from restored queue
-                                    if let Ok(serialized) = serde_json::to_string_pretty(&state.queue) {
+                                    if let Ok(serialized) =
+                                        serde_json::to_string_pretty(&state.queue)
+                                    {
                                         let _ = write_atomic(&path, &serialized);
                                     }
-                                    let _ = app.emit("queue-corruption-recovered", serde_json::json!({
-                                        "backup_item_count": backup_item_count,
-                                        "message": "Queue restored from backup"
-                                    }));
+                                    let _ = app.emit(
+                                        "queue-corruption-recovered",
+                                        serde_json::json!({
+                                            "backup_item_count": backup_item_count,
+                                            "message": "Queue restored from backup"
+                                        }),
+                                    );
                                 }
                                 Err(_) => {
                                     // Backup also corrupt: empty queue
-                                    let _ = app.emit("queue-corruption-unrecoverable", serde_json::json!({
-                                        "error": parse_err.to_string()
-                                    }));
+                                    let _ = app.emit(
+                                        "queue-corruption-unrecoverable",
+                                        serde_json::json!({
+                                            "error": parse_err.to_string()
+                                        }),
+                                    );
                                 }
                             }
                         }
                         Err(_) => {
                             // No backup: empty queue
-                            let _ = app.emit("queue-corruption-unrecoverable", serde_json::json!({
-                                "error": parse_err.to_string()
-                            }));
+                            let _ = app.emit(
+                                "queue-corruption-unrecoverable",
+                                serde_json::json!({
+                                    "error": parse_err.to_string()
+                                }),
+                            );
                         }
                     }
                 }
@@ -1118,109 +462,6 @@ pub fn retry_delay_ms_for_strategy(strategy: &RetryStrategy, attempt: usize) -> 
     table[idx]
 }
 
-fn remove_directory_safe(path: &Path) {
-    let _ = fs::remove_dir_all(path);
-}
-
-/// Moves a file atomically.
-/// Same-FS: uses fs::rename (atomic). Cross-device: writes .incomplete marker,
-/// copies, verifies size, removes marker, removes source.
-// @MX:WARN: [AUTO] Cross-device copy is NOT atomic. Incomplete marker guards against power loss corruption.
-// @MX:REASON: [AUTO] See SPEC-STABILITY-002 REQ-002 for incomplete marker protocol.
-fn move_file_atomic(source: &Path, destination: &Path) -> Result<(), String> {
-    if let Some(parent) = destination.parent() {
-        fs::create_dir_all(parent).map_err(|err| err.to_string())?;
-    }
-
-    match fs::rename(source, destination) {
-        Ok(()) => Ok(()),
-        Err(err) => {
-            let is_cross_device = err.kind() == std::io::ErrorKind::CrossesDevices
-                || err.raw_os_error() == Some(18)
-                || err.raw_os_error() == Some(17);
-            if !is_cross_device {
-                return Err(err.to_string());
-            }
-            // Cross-device: use .incomplete marker for crash safety
-            let incomplete_path = PathBuf::from(format!("{}.incomplete", destination.display()));
-            // Write marker (content is minimal JSON for diagnostics)
-            let started_at = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-            let marker_content = serde_json::json!({
-                "started_at": started_at,
-                "source": source.display().to_string()
-            });
-            {
-                let mut f = fs::File::create(&incomplete_path)
-                    .map_err(|e| format!("Failed to create .incomplete marker: {e}"))?;
-                f.write_all(marker_content.to_string().as_bytes())
-                    .map_err(|e| e.to_string())?;
-            }
-
-            // Copy source → destination
-            let copied_bytes = fs::copy(source, destination)
-                .map_err(|copy_err| {
-                    // Leave .incomplete marker so startup scan can detect it
-                    format!("Copy failed: {copy_err}")
-                })?;
-
-            // Verify size matches
-            let source_size = fs::metadata(source)
-                .map(|m| m.len())
-                .unwrap_or(0);
-            if source_size > 0 && copied_bytes != source_size {
-                return Err(format!(
-                    "Size mismatch after copy: expected {source_size} bytes, got {copied_bytes}"
-                ));
-            }
-
-            // Remove .incomplete marker (transfer complete)
-            let _ = fs::remove_file(&incomplete_path);
-
-            // Remove source
-            fs::remove_file(source).map_err(|remove_err| remove_err.to_string())?;
-            Ok(())
-        }
-    }
-}
-
-fn resolve_downloaded_file_path(temp_dir: &Path, expected_ext: &str) -> Result<PathBuf, String> {
-    let prioritized = temp_dir.join(format!("media.{expected_ext}"));
-    if prioritized.exists() {
-        return Ok(prioritized);
-    }
-
-    let mut candidates: Vec<(PathBuf, std::time::SystemTime)> = Vec::new();
-    let entries = fs::read_dir(temp_dir).map_err(|err| err.to_string())?;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-        let ext = path
-            .extension()
-            .map(|value| value.to_string_lossy().to_string().to_lowercase())
-            .unwrap_or_default();
-        if ext != expected_ext.to_lowercase() {
-            continue;
-        }
-        let modified = entry
-            .metadata()
-            .and_then(|meta| meta.modified())
-            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-        candidates.push((path, modified));
-    }
-
-    if candidates.is_empty() {
-        return Err("완성 파일을 임시 폴더에서 찾지 못했습니다.".to_string());
-    }
-
-    candidates.sort_by(|a, b| b.1.cmp(&a.1));
-    Ok(candidates[0].0.clone())
-}
-
 /// Scans the download directory for `.incomplete` marker files at startup.
 /// For each marker: finds matching queue item by output_path, marks it failed,
 /// then removes the marker regardless of whether a matching item was found.
@@ -1251,64 +492,14 @@ fn scan_incomplete_markers(app: &AppHandle, state: &mut AppState) {
             .find(|i| i.output_path.as_deref() == Some(&dest_str_full))
         {
             item.status = "failed".to_string();
-            item.error_message = Some(
-                "Transfer incomplete - file may be corrupted. Please retry.".to_string(),
-            );
+            item.error_message =
+                Some("Transfer incomplete - file may be corrupted. Please retry.".to_string());
         }
         // Remove the .incomplete marker regardless of match
         let _ = fs::remove_file(&path);
     }
     // Emit event to surface the updated queue state if app handle is available
     let _ = app.emit("queue-updated", serde_json::json!({}));
-}
-
-fn normalize_youtube_video_url(raw_url: &str) -> String {
-    let input = raw_url.trim();
-    if input.is_empty() {
-        return input.to_string();
-    }
-
-    let parsed = Url::parse(input);
-    if parsed.is_err() {
-        return input.to_string();
-    }
-    let parsed = parsed.unwrap_or_else(|_| unreachable!());
-    let host = parsed.host_str().unwrap_or_default().to_lowercase();
-
-    if host.contains("youtube.com") {
-        if let Some(video_id) = parsed
-            .query_pairs()
-            .find(|(k, _)| k == "v")
-            .map(|(_, v)| v.to_string())
-        {
-            return format!("https://www.youtube.com/watch?v={video_id}");
-        }
-        let path_parts: Vec<&str> = parsed.path().split('/').filter(|part| !part.is_empty()).collect();
-        if path_parts.len() >= 2 && (path_parts[0] == "shorts" || path_parts[0] == "live") {
-            return format!("https://www.youtube.com/watch?v={}", path_parts[1]);
-        }
-    }
-
-    if host == "youtu.be" {
-        let video_id = parsed.path().split('/').find(|part| !part.is_empty());
-        if let Some(video_id) = video_id {
-            return format!("https://www.youtube.com/watch?v={video_id}");
-        }
-    }
-
-    input.to_string()
-}
-
-fn sanitize_file_name(raw_name: &str) -> String {
-    let re = Regex::new(r#"[\\/:*?"<>|]"#).unwrap_or_else(|_| unreachable!());
-    let replaced = re.replace_all(raw_name, "_");
-    let collapsed = replaced.split_whitespace().collect::<Vec<&str>>().join(" ");
-    let trimmed = collapsed.trim().trim_end_matches(['.', ' ']).to_string();
-    if trimmed.is_empty() {
-        "download".to_string()
-    } else {
-        trimmed.chars().take(160).collect()
-    }
 }
 
 fn expected_extension(mode: &DownloadMode) -> &'static str {
@@ -1361,28 +552,6 @@ fn select_format_expression(mode: &DownloadMode, quality_id: &str) -> String {
     }
 }
 
-fn parse_progress_percent(line: &str) -> Option<f64> {
-    let idx = line.find('%')?;
-    let prefix = &line[..idx];
-    let start = prefix.rfind(|ch: char| !(ch.is_ascii_digit() || ch == '.'))?;
-    let value = prefix[start + 1..].trim().parse::<f64>().ok()?;
-    Some(value)
-}
-
-fn parse_speed(line: &str) -> Option<String> {
-    let at = line.find(" at ")?;
-    let eta = line.find(" ETA")?;
-    if eta <= at + 4 {
-        return None;
-    }
-    Some(line[at + 4..eta].trim().to_string())
-}
-
-fn parse_eta(line: &str) -> Option<String> {
-    let eta = line.find(" ETA ")?;
-    Some(line[eta + 5..].trim().to_string())
-}
-
 fn append_download_log(item: &mut QueueItem, line: &str) -> bool {
     let log = item.download_log.get_or_insert_with(Vec::new);
     if log.last().map(|last| last == line).unwrap_or(false) {
@@ -1396,7 +565,12 @@ fn append_download_log(item: &mut QueueItem, line: &str) -> bool {
     true
 }
 
-fn handle_download_output_line(shared: &Arc<Mutex<AppState>>, app: &AppHandle, job_id: &str, line: &str) {
+fn handle_download_output_line(
+    shared: &Arc<Mutex<AppState>>,
+    app: &AppHandle,
+    job_id: &str,
+    line: &str,
+) {
     let normalized = line.trim();
     if normalized.is_empty() {
         return;
@@ -1422,10 +596,11 @@ fn handle_download_output_line(shared: &Arc<Mutex<AppState>>, app: &AppHandle, j
             should_emit |= append_download_log(item, normalized);
 
             if (normalized.contains("ERROR:") || normalized.contains("HTTP Error"))
-                && item.error_message.as_deref() != Some(normalized) {
-                    item.error_message = Some(normalized.to_string());
-                    should_emit = true;
-                }
+                && item.error_message.as_deref() != Some(normalized)
+            {
+                item.error_message = Some(normalized.to_string());
+                should_emit = true;
+            }
             if let Some(progress) = parse_progress_percent(normalized) {
                 if (item.progress_percent - progress).abs() > f64::EPSILON {
                     item.progress_percent = progress;
@@ -1549,12 +724,13 @@ fn clear_active_process(runtime: &Arc<Mutex<RuntimeState>>, job_id: &str) {
     }
 }
 
-fn start_worker_if_needed(app: AppHandle, shared: Arc<Mutex<AppState>>, runtime: Arc<Mutex<RuntimeState>>) {
+fn start_worker_if_needed(
+    app: AppHandle,
+    shared: Arc<Mutex<AppState>>,
+    runtime: Arc<Mutex<RuntimeState>>,
+) {
     let should_start = {
-        let mut state = shared.lock().unwrap_or_else(|e| {
-    eprintln!("[STABILITY] Mutex poisoned, recovering: {:?}", e);
-    e.into_inner()
-});
+        let mut state = lock_or_recover(&shared, "start_worker_if_needed/should_start");
         let max_concurrent = state.settings.max_concurrent_downloads.clamp(1, 3) as usize;
         if state.active_worker_count >= max_concurrent {
             false
@@ -1573,10 +749,7 @@ fn start_worker_if_needed(app: AppHandle, shared: Arc<Mutex<AppState>>, runtime:
     // Create a shutdown channel for graceful worker termination.
     let (shutdown_tx, shutdown_rx) = std::sync::mpsc::channel::<()>();
     {
-        let mut rt = runtime.lock().unwrap_or_else(|e| {
-            eprintln!("[STABILITY] Runtime mutex poisoned, recovering: {:?}", e);
-            e.into_inner()
-        });
+        let mut rt = lock_or_recover(&runtime, "start_worker_if_needed/shutdown_tx");
         rt.shutdown_txs.push(shutdown_tx);
     }
 
@@ -1585,285 +758,281 @@ fn start_worker_if_needed(app: AppHandle, shared: Arc<Mutex<AppState>>, runtime:
     let handle = std::thread::spawn(move || {
         let runtime = runtime_for_thread;
         loop {
-        // Check for shutdown signal before processing the next job.
-        if shutdown_rx.try_recv().is_ok() {
-            eprintln!("[STABILITY] Worker thread received shutdown signal; exiting");
-            let mut state = shared.lock().unwrap_or_else(|e| {
-                eprintln!("[STABILITY] Mutex poisoned on shutdown, recovering");
-                e.into_inner()
-            });
-            state.active_worker_count = state.active_worker_count.saturating_sub(1);
-            return;
-        }
-        let current_job = {
-            let mut state = shared.lock().unwrap_or_else(|e| {
-    eprintln!("[STABILITY] Mutex poisoned, recovering: {:?}", e);
-    e.into_inner()
-});
-            let next_index = state.queue.iter().position(|item| item.status == "queued");
-            if let Some(index) = next_index {
-                state.queue[index].status = "downloading".to_string();
-                state.queue[index].progress_percent = 0.0;
-                let job = state.queue[index].clone();
-                emit_queue_updated(&app, &state);
-                Some(job)
-            } else {
+            // Check for shutdown signal before processing the next job.
+            if shutdown_rx.try_recv().is_ok() {
+                eprintln!("[STABILITY] Worker thread received shutdown signal; exiting");
+                let mut state = lock_or_recover(&shared, "worker_thread/shutdown");
                 state.active_worker_count = state.active_worker_count.saturating_sub(1);
-                emit_queue_updated(&app, &state);
-                None
+                return;
             }
-        };
-
-        let Some(job) = current_job else {
-            return;
-        };
-
-        if let Some(dependency) = app.try_state::<SharedDependencyState>() {
-            if let Err(err) = wait_for_dependencies(&app, &dependency.0) {
-                let mut state = shared.lock().unwrap_or_else(|e| {
-    eprintln!("[STABILITY] Mutex poisoned, recovering: {:?}", e);
-    e.into_inner()
-});
-                if let Some(item) = state.queue.iter_mut().find(|item| item.id == job.id) {
-                    item.status = "failed".to_string();
-                    item.error_message = Some(err);
+            let current_job = {
+                let mut state = lock_or_recover(&shared, "worker_thread/current_job");
+                let next_index = state.queue.iter().position(|item| item.status == "queued");
+                if let Some(index) = next_index {
+                    state.queue[index].status = "downloading".to_string();
+                    state.queue[index].progress_percent = 0.0;
+                    let job = state.queue[index].clone();
+                    emit_queue_updated(&app, &state);
+                    Some(job)
+                } else {
+                    state.active_worker_count = state.active_worker_count.saturating_sub(1);
+                    emit_queue_updated(&app, &state);
+                    None
                 }
-                emit_queue_updated(&app, &state);
-                persist_queue(&app, &state);
-                continue;
-            }
-        }
-
-        let (download_dir, final_output_path, max_retries) = {
-            let state = shared.lock().unwrap_or_else(|e| {
-    eprintln!("[STABILITY] Mutex poisoned, recovering: {:?}", e);
-    e.into_inner()
-});
-            let path = build_unique_output_path(&state, &job.title, &job.mode);
-            (
-                state.settings.download_dir.clone(),
-                path,
-                state.settings.max_retries.max(0) as usize,
-            )
-        };
-
-        let _ = fs::create_dir_all(&download_dir);
-        let temp_dir = temp_job_dir_path(&app, &job.id);
-        let _ = fs::create_dir_all(&temp_dir);
-        let output_template = temp_dir.join("media.%(ext)s");
-
-        let format_expr = select_format_expression(&job.mode, &job.quality_id);
-        let mut args = vec![
-            "--no-playlist".to_string(),
-            "--newline".to_string(),
-            "--progress".to_string(),
-            "--socket-timeout".to_string(),
-            "30".to_string(),
-            "--fragment-retries".to_string(),
-            "10".to_string(),
-            "--throttled-rate".to_string(),
-            "100K".to_string(),
-            "--extractor-retries".to_string(),
-            "5".to_string(),
-            "--concurrent-fragments".to_string(),
-            "4".to_string(),
-            "-f".to_string(),
-            format_expr,
-            "-o".to_string(),
-            output_template.to_string_lossy().to_string(),
-            job.url.clone(),
-        ];
-
-        match job.mode {
-            DownloadMode::Audio => {
-                args.push("-x".to_string());
-                args.push("--audio-format".to_string());
-                args.push("mp3".to_string());
-            }
-            DownloadMode::Video => {
-                args.push("--merge-output-format".to_string());
-                args.push("mp4".to_string());
-                args.push("--recode-video".to_string());
-                args.push("mp4".to_string());
-            }
-        }
-
-        let mut attempt: usize = 0;
-        loop {
-            {
-                let state = shared.lock().unwrap_or_else(|e| {
-    eprintln!("[STABILITY] Mutex poisoned, recovering: {:?}", e);
-    e.into_inner()
-});
-                let stopped = state
-                    .queue
-                    .iter()
-                    .find(|item| item.id == job.id)
-                    .map(|item| item.status == "paused" || item.status == "canceled")
-                    .unwrap_or(true);
-                if stopped {
-                    break;
-                }
-            }
-
-            let yt_dlp = resolve_executable(&app, "yt-dlp");
-            let mut cmd = Command::new(&yt_dlp);
-            configure_hidden_process(&mut cmd);
-            let spawn_result = cmd
-                .args(args.clone())
-                .env("PATH", managed_path_env(&app))
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn();
-
-            let (process_ok, process_error): (bool, Option<String>) = match spawn_result {
-                Ok(mut child) => {
-                    let stdout_reader = child.stdout.take().map(BufReader::new);
-                    let stderr_reader = child.stderr.take().map(BufReader::new);
-
-                    let child_arc = Arc::new(Mutex::new(child));
-                    {
-                        let mut guard = runtime.lock().unwrap_or_else(|e| {
-    eprintln!("[STABILITY] Runtime mutex poisoned, recovering: {:?}", e);
-    e.into_inner()
-});
-                        guard.active_processes.insert(job.id.clone(), ActiveProcess {
-                            job_id: job.id.clone(),
-                            child: child_arc.clone(),
-                        });
-                    }
-
-                    let shared_stdout = shared.clone();
-                    let app_stdout = app.clone();
-                    let job_id_stdout = job.id.clone();
-                    let stdout_thread = stdout_reader.map(|reader| {
-                        std::thread::spawn(move || {
-                            for line in reader.lines().map_while(Result::ok) {
-                                handle_download_output_line(&shared_stdout, &app_stdout, &job_id_stdout, &line);
-                            }
-                        })
-                    });
-
-                    let shared_stderr = shared.clone();
-                    let app_stderr = app.clone();
-                    let job_id_stderr = job.id.clone();
-                    let stderr_thread = stderr_reader.map(|reader| {
-                        std::thread::spawn(move || {
-                            for line in reader.lines().map_while(Result::ok) {
-                                handle_download_output_line(&shared_stderr, &app_stderr, &job_id_stderr, &line);
-                            }
-                        })
-                    });
-
-                    let wait_result = loop {
-                        let status = {
-                            // Keep the child lock only for try_wait, so pause/cancel can acquire it.
-                            let mut locked_child =
-                                child_arc.lock().unwrap_or_else(|e| {
-    eprintln!("[STABILITY] Child mutex poisoned, recovering: {:?}", e);
-    e.into_inner()
-});
-                            locked_child.try_wait()
-                        };
-
-                        match status {
-                            Ok(Some(exit_status)) => break Ok(exit_status),
-                            Ok(None) => std::thread::sleep(Duration::from_millis(100)),
-                            Err(err) => break Err(err),
-                        }
-                    };
-
-                    if let Some(handle) = stdout_thread {
-                        let _ = handle.join();
-                    }
-                    if let Some(handle) = stderr_thread {
-                        let _ = handle.join();
-                    }
-
-                    clear_active_process(&runtime, &job.id);
-
-                    match wait_result {
-                        Ok(exit_status) => (exit_status.success(), None),
-                        Err(err) => (false, Some(err.to_string())),
-                    }
-                }
-                Err(err) => (false, Some(err.to_string())),
             };
 
-            let mut should_retry = false;
-            let mut should_retry_strategy = RetryStrategy::Default;
-            {
-                let mut state = shared.lock().unwrap_or_else(|e| {
-    eprintln!("[STABILITY] Mutex poisoned, recovering: {:?}", e);
-    e.into_inner()
-});
-                if let Some(item) = state.queue.iter_mut().find(|item| item.id == job.id) {
-                    if item.status == "paused" || item.status == "canceled" {
-                        // Keep paused/canceled state as-is.
-                    } else if process_ok {
-                        let expected_ext = expected_extension(&job.mode);
-                        let move_result = resolve_downloaded_file_path(&temp_dir, expected_ext)
-                            .and_then(|completed_path| move_file_atomic(&completed_path, &final_output_path));
-                        match move_result {
-                            Ok(()) => {
-                                item.status = "completed".to_string();
-                                item.progress_percent = 100.0;
-                                item.output_path = Some(final_output_path.to_string_lossy().to_string());
-                                item.error_message = None;
-                            }
-                            Err(err) => {
-                                item.status = "failed".to_string();
-                                item.error_message = Some(err);
-                            }
-                        }
-                    } else {
-                        let fallback = process_error.unwrap_or_else(|| "다운로드 실패".to_string());
-                        item.error_message = Some(fallback.clone());
-                        let strategy = classify_download_error(&fallback);
-                        if strategy == RetryStrategy::NoRetry {
-                            item.status = "failed".to_string();
-                        } else if attempt < max_retries {
-                            should_retry = true;
-                            should_retry_strategy = strategy;
-                            item.retry_count = (attempt + 1) as i32;
-                            item.status = "queued".to_string();
-                            item.speed_text = None;
-                            item.eta_text = None;
-                        } else {
-                            item.status = "failed".to_string();
-                        }
+            let Some(job) = current_job else {
+                return;
+            };
+
+            if let Some(dependency) = app.try_state::<SharedDependencyState>() {
+                if let Err(err) = wait_for_dependencies(&app, &dependency.0) {
+                    let mut state = lock_or_recover(&shared, "worker_thread/wait_for_deps_failure");
+                    if let Some(item) = state.queue.iter_mut().find(|item| item.id == job.id) {
+                        item.status = "failed".to_string();
+                        item.error_message = Some(err);
+                    }
+                    emit_queue_updated(&app, &state);
+                    persist_queue(&app, &state);
+                    continue;
+                }
+            }
+
+            let (download_dir, final_output_path, max_retries) = {
+                let state = lock_or_recover(&shared, "worker_thread/download_setup");
+                let path = build_unique_output_path(&state, &job.title, &job.mode);
+                (
+                    state.settings.download_dir.clone(),
+                    path,
+                    state.settings.max_retries.max(0) as usize,
+                )
+            };
+
+            let _ = fs::create_dir_all(&download_dir);
+            let temp_dir = temp_job_dir_path(&app, &job.id);
+            let _ = fs::create_dir_all(&temp_dir);
+            let output_template = temp_dir.join("media.%(ext)s");
+
+            let format_expr = select_format_expression(&job.mode, &job.quality_id);
+            let mut args = vec![
+                "--no-playlist".to_string(),
+                "--newline".to_string(),
+                "--progress".to_string(),
+                "--socket-timeout".to_string(),
+                "30".to_string(),
+                "--fragment-retries".to_string(),
+                "10".to_string(),
+                "--throttled-rate".to_string(),
+                "100K".to_string(),
+                "--extractor-retries".to_string(),
+                "5".to_string(),
+                "--concurrent-fragments".to_string(),
+                "4".to_string(),
+                "-f".to_string(),
+                format_expr,
+                "-o".to_string(),
+                output_template.to_string_lossy().to_string(),
+                job.url.clone(),
+            ];
+
+            match job.mode {
+                DownloadMode::Audio => {
+                    args.push("-x".to_string());
+                    args.push("--audio-format".to_string());
+                    args.push("mp3".to_string());
+                }
+                DownloadMode::Video => {
+                    args.push("--merge-output-format".to_string());
+                    args.push("mp4".to_string());
+                    args.push("--recode-video".to_string());
+                    args.push("mp4".to_string());
+                }
+            }
+
+            let mut attempt: usize = 0;
+            loop {
+                {
+                    let state = lock_or_recover(&shared, "worker_thread/retry_loop_stop_check");
+                    let stopped = state
+                        .queue
+                        .iter()
+                        .find(|item| item.id == job.id)
+                        .map(|item| item.status == "paused" || item.status == "canceled")
+                        .unwrap_or(true);
+                    if stopped {
+                        break;
                     }
                 }
-                emit_queue_updated(&app, &state);
-                persist_queue(&app, &state);
+
+                let yt_dlp = resolve_executable(&app, "yt-dlp");
+                let mut cmd = Command::new(&yt_dlp);
+                configure_hidden_process(&mut cmd);
+                let spawn_result = cmd
+                    .args(args.clone())
+                    .env("PATH", managed_path_env(&app))
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn();
+
+                let (process_ok, process_error): (bool, Option<String>) = match spawn_result {
+                    Ok(mut child) => {
+                        let stdout_reader = child.stdout.take().map(BufReader::new);
+                        let stderr_reader = child.stderr.take().map(BufReader::new);
+
+                        let child_arc = Arc::new(Mutex::new(child));
+                        {
+                            let mut guard =
+                                lock_or_recover(&runtime, "worker_thread/active_processes_insert");
+                            guard.active_processes.insert(
+                                job.id.clone(),
+                                ActiveProcess {
+                                    job_id: job.id.clone(),
+                                    child: child_arc.clone(),
+                                },
+                            );
+                        }
+
+                        let shared_stdout = shared.clone();
+                        let app_stdout = app.clone();
+                        let job_id_stdout = job.id.clone();
+                        let stdout_thread = stdout_reader.map(|reader| {
+                            std::thread::spawn(move || {
+                                for line in reader.lines().map_while(Result::ok) {
+                                    handle_download_output_line(
+                                        &shared_stdout,
+                                        &app_stdout,
+                                        &job_id_stdout,
+                                        &line,
+                                    );
+                                }
+                            })
+                        });
+
+                        let shared_stderr = shared.clone();
+                        let app_stderr = app.clone();
+                        let job_id_stderr = job.id.clone();
+                        let stderr_thread = stderr_reader.map(|reader| {
+                            std::thread::spawn(move || {
+                                for line in reader.lines().map_while(Result::ok) {
+                                    handle_download_output_line(
+                                        &shared_stderr,
+                                        &app_stderr,
+                                        &job_id_stderr,
+                                        &line,
+                                    );
+                                }
+                            })
+                        });
+
+                        let wait_result = loop {
+                            let status = {
+                                // Keep the child lock only for try_wait, so pause/cancel can acquire it.
+                                let mut locked_child =
+                                    lock_or_recover(&child_arc, "worker_thread/child_try_wait");
+                                locked_child.try_wait()
+                            };
+
+                            match status {
+                                Ok(Some(exit_status)) => break Ok(exit_status),
+                                Ok(None) => std::thread::sleep(Duration::from_millis(100)),
+                                Err(err) => break Err(err),
+                            }
+                        };
+
+                        if let Some(handle) = stdout_thread {
+                            let _ = handle.join();
+                        }
+                        if let Some(handle) = stderr_thread {
+                            let _ = handle.join();
+                        }
+
+                        clear_active_process(&runtime, &job.id);
+
+                        match wait_result {
+                            Ok(exit_status) => (exit_status.success(), None),
+                            Err(err) => (false, Some(err.to_string())),
+                        }
+                    }
+                    Err(err) => (false, Some(err.to_string())),
+                };
+
+                let mut should_retry = false;
+                let mut should_retry_strategy = RetryStrategy::Default;
+                {
+                    let mut state = lock_or_recover(&shared, "worker_thread/retry_result");
+                    if let Some(item) = state.queue.iter_mut().find(|item| item.id == job.id) {
+                        if item.status == "paused" || item.status == "canceled" {
+                            // Keep paused/canceled state as-is.
+                        } else if process_ok {
+                            let expected_ext = expected_extension(&job.mode);
+                            let move_result = resolve_downloaded_file_path(&temp_dir, expected_ext)
+                                .and_then(|completed_path| {
+                                    move_file_atomic(&completed_path, &final_output_path)
+                                });
+                            match move_result {
+                                Ok(()) => {
+                                    item.status = "completed".to_string();
+                                    item.progress_percent = 100.0;
+                                    item.output_path =
+                                        Some(final_output_path.to_string_lossy().to_string());
+                                    item.error_message = None;
+                                }
+                                Err(err) => {
+                                    item.status = "failed".to_string();
+                                    item.error_message = Some(err);
+                                }
+                            }
+                        } else {
+                            let fallback =
+                                process_error.unwrap_or_else(|| "다운로드 실패".to_string());
+                            item.error_message = Some(fallback.clone());
+                            let strategy = classify_download_error(&fallback);
+                            if strategy == RetryStrategy::NoRetry {
+                                item.status = "failed".to_string();
+                            } else if attempt < max_retries {
+                                should_retry = true;
+                                should_retry_strategy = strategy;
+                                item.retry_count = (attempt + 1) as i32;
+                                item.status = "queued".to_string();
+                                item.speed_text = None;
+                                item.eta_text = None;
+                            } else {
+                                item.status = "failed".to_string();
+                            }
+                        }
+                    }
+                    emit_queue_updated(&app, &state);
+                    persist_queue(&app, &state);
+                }
+
+                if should_retry {
+                    attempt += 1;
+                    std::thread::sleep(Duration::from_millis(retry_delay_ms_for_strategy(
+                        &should_retry_strategy,
+                        attempt,
+                    )));
+                    continue;
+                }
+                break;
             }
 
-            if should_retry {
-                attempt += 1;
-                std::thread::sleep(Duration::from_millis(
-                    retry_delay_ms_for_strategy(&should_retry_strategy, attempt),
-                ));
-                continue;
-            }
-            break;
-        }
-
-        remove_directory_safe(&temp_dir);
+            remove_directory_safe(&temp_dir);
         } // end loop
     }); // end thread closure
 
     // Store the worker handle for graceful join on shutdown.
     {
-        let mut rt = runtime.lock().unwrap_or_else(|e| {
-            eprintln!("[STABILITY] Runtime mutex poisoned, recovering: {:?}", e);
-            e.into_inner()
-        });
+        let mut rt = lock_or_recover(&runtime, "start_worker_if_needed/worker_handle");
         rt.worker_handles.push(handle);
     }
 }
 
 #[tauri::command]
-async fn analyze_url(app: AppHandle, dependency: State<'_, SharedDependencyState>, url: String) -> CommandResult<AnalysisResult> {
+async fn analyze_url(
+    app: AppHandle,
+    dependency: State<'_, SharedDependencyState>,
+    url: String,
+) -> CommandResult<AnalysisResult> {
     let normalized_url = normalize_youtube_video_url(&url);
     if normalized_url.trim().is_empty() {
         return Err("URL is empty".to_string());
@@ -1875,7 +1044,12 @@ async fn analyze_url(app: AppHandle, dependency: State<'_, SharedDependencyState
     let output = run_command_capture(
         &app,
         &yt_dlp,
-        &["--no-playlist", "-J", "--no-warnings", normalized_url.trim()],
+        &[
+            "--no-playlist",
+            "-J",
+            "--no-warnings",
+            normalized_url.trim(),
+        ],
         ANALYZE_TIMEOUT_MS,
     );
 
@@ -1998,8 +1172,10 @@ async fn analyze_url(app: AppHandle, dependency: State<'_, SharedDependencyState
         });
     }
 
-    let mut audio_options: Vec<QualityOption> =
-        audio_candidates.into_iter().map(|(_, option)| option).collect();
+    let mut audio_options: Vec<QualityOption> = audio_candidates
+        .into_iter()
+        .map(|(_, option)| option)
+        .collect();
     if audio_options.is_empty() {
         audio_options.push(QualityOption {
             id: "bestaudio".to_string(),
@@ -2038,7 +1214,10 @@ async fn check_duplicate(
     input: CheckDuplicateInput,
 ) -> CommandResult<DuplicateCheckResult> {
     let normalized_url = normalize_youtube_video_url(&input.url);
-    let state = state.0.lock().map_err(|_| "state lock poisoned".to_string())?;
+    let state = state
+        .0
+        .lock()
+        .map_err(|_| "state lock poisoned".to_string())?;
     let duplicate = state.queue.iter().find(|item| {
         item.url == normalized_url
             && item.mode == input.mode
@@ -2061,7 +1240,10 @@ async fn enqueue_job(
 ) -> CommandResult<Value> {
     let normalized_url = normalize_youtube_video_url(&input.url);
 
-    let mut locked = state.0.lock().map_err(|_| "state lock poisoned".to_string())?;
+    let mut locked = state
+        .0
+        .lock()
+        .map_err(|_| "state lock poisoned".to_string())?;
     if !input.force_duplicate {
         let duplicate = locked.queue.iter().find(|item| {
             item.url == normalized_url
@@ -2107,7 +1289,10 @@ async fn pause_job(
     runtime: State<'_, SharedRuntime>,
     id: String,
 ) -> CommandResult<QueueSnapshot> {
-    let mut state = state.0.lock().map_err(|_| "state lock poisoned".to_string())?;
+    let mut state = state
+        .0
+        .lock()
+        .map_err(|_| "state lock poisoned".to_string())?;
     if let Some(item) = state.queue.iter_mut().find(|item| item.id == id) {
         item.status = "paused".to_string();
         item.speed_text = None;
@@ -2157,7 +1342,10 @@ async fn cancel_job(
     runtime: State<'_, SharedRuntime>,
     id: String,
 ) -> CommandResult<QueueSnapshot> {
-    let mut state = state.0.lock().map_err(|_| "state lock poisoned".to_string())?;
+    let mut state = state
+        .0
+        .lock()
+        .map_err(|_| "state lock poisoned".to_string())?;
     if let Some(item) = state.queue.iter_mut().find(|item| item.id == id) {
         item.status = "canceled".to_string();
         item.error_message = Some("사용자 취소".to_string());
@@ -2177,11 +1365,17 @@ async fn cancel_job(
 }
 
 #[tauri::command]
-async fn clear_terminal_jobs(app: AppHandle, state: State<'_, SharedState>) -> CommandResult<QueueSnapshot> {
-    let mut state = state.0.lock().map_err(|_| "state lock poisoned".to_string())?;
-    state
-        .queue
-        .retain(|item| item.status != "completed" && item.status != "failed" && item.status != "canceled");
+async fn clear_terminal_jobs(
+    app: AppHandle,
+    state: State<'_, SharedState>,
+) -> CommandResult<QueueSnapshot> {
+    let mut state = state
+        .0
+        .lock()
+        .map_err(|_| "state lock poisoned".to_string())?;
+    state.queue.retain(|item| {
+        item.status != "completed" && item.status != "failed" && item.status != "canceled"
+    });
     let snapshot = queue_snapshot(&state);
     emit_queue_updated(&app, &state);
     persist_queue(&app, &state);
@@ -2190,13 +1384,19 @@ async fn clear_terminal_jobs(app: AppHandle, state: State<'_, SharedState>) -> C
 
 #[tauri::command]
 async fn get_queue_snapshot(state: State<'_, SharedState>) -> CommandResult<QueueSnapshot> {
-    let state = state.0.lock().map_err(|_| "state lock poisoned".to_string())?;
+    let state = state
+        .0
+        .lock()
+        .map_err(|_| "state lock poisoned".to_string())?;
     Ok(queue_snapshot(&state))
 }
 
 #[tauri::command]
 async fn get_settings(state: State<'_, SharedState>) -> CommandResult<AppSettings> {
-    let state = state.0.lock().map_err(|_| "state lock poisoned".to_string())?;
+    let state = state
+        .0
+        .lock()
+        .map_err(|_| "state lock poisoned".to_string())?;
     Ok(state.settings.clone())
 }
 
@@ -2218,8 +1418,15 @@ async fn pick_download_dir() -> CommandResult<Option<String>> {
 }
 
 #[tauri::command]
-async fn set_settings(app: AppHandle, state: State<'_, SharedState>, settings: AppSettings) -> CommandResult<()> {
-    let mut state = state.0.lock().map_err(|_| "state lock poisoned".to_string())?;
+async fn set_settings(
+    app: AppHandle,
+    state: State<'_, SharedState>,
+    settings: AppSettings,
+) -> CommandResult<()> {
+    let mut state = state
+        .0
+        .lock()
+        .map_err(|_| "state lock poisoned".to_string())?;
     state.settings = AppSettings {
         download_dir: normalize_download_dir(&settings.download_dir),
         max_retries: settings.max_retries.clamp(0, 10),
@@ -2231,247 +1438,25 @@ async fn set_settings(app: AppHandle, state: State<'_, SharedState>, settings: A
 }
 
 #[tauri::command]
-async fn run_diagnostics(
+async fn delete_file(
     app: AppHandle,
     state: State<'_, SharedState>,
-    dependency: State<'_, SharedDependencyState>,
-) -> CommandResult<DiagnosticsResult> {
-    let dependency_error_message = wait_for_dependencies(&app, &dependency.0).err();
-    let state = state.0.lock().map_err(|_| "state lock poisoned".to_string())?;
-    let yt_dlp = resolve_executable(&app, "yt-dlp");
-    let ffmpeg = resolve_executable(&app, "ffmpeg");
-    let yt = run_command_capture(&app, &yt_dlp, &["--version"], DIAGNOSTICS_COMMAND_TIMEOUT_MS);
-    let ff = run_command_capture(&app, &ffmpeg, &["-version"], DIAGNOSTICS_COMMAND_TIMEOUT_MS);
-    let yt_ok = yt.code == 0;
-    let ff_ok = ff.code == 0;
-
-    let download_dir = PathBuf::from(&state.settings.download_dir);
-    let _ = fs::create_dir_all(&download_dir);
-    let writable = can_write_to_dir(&download_dir);
-
-    let yt_reason = if yt_ok {
-        String::new()
-    } else if yt.timed_out {
-        "timeout".to_string()
-    } else {
-        yt.stderr.trim().to_string()
-    };
-    let ff_reason = if ff_ok {
-        String::new()
-    } else if ff.timed_out {
-        "timeout".to_string()
-    } else {
-        ff.stderr.trim().to_string()
-    };
-
-    Ok(DiagnosticsResult {
-        yt_dlp_available: yt_ok,
-        ffmpeg_available: ff_ok,
-        download_path_writable: writable,
-        message: {
-            let yt_status = if yt_ok { "OK" } else { "FAIL" };
-            let yt_detail = if yt_ok {
-                String::new()
-            } else {
-                format!(" ({})", truncate_reason(&yt_reason))
-            };
-            let ff_status = if ff_ok { "OK" } else { "FAIL" };
-            let ff_detail = if ff_ok {
-                String::new()
-            } else {
-                format!(" ({})", truncate_reason(&ff_reason))
-            };
-            let writable_status = if writable { "OK" } else { "FAIL" };
-            let bootstrap_detail = dependency_error_message
-                .map(|message| format!(", bootstrap: {message}"))
-                .unwrap_or_default();
-            format!(
-                "yt-dlp: {yt_status}{yt_detail} ({yt_dlp}), ffmpeg: {ff_status}{ff_detail} ({ffmpeg}), download-dir writable: {writable_status}{bootstrap_detail}"
-            )
-        },
-    })
-}
-
-fn can_write_to_dir(dir: &Path) -> bool {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or(Duration::from_secs(0))
-        .as_millis();
-    let test_file = dir.join(format!("tubeextract_write_test_{now}.tmp"));
-    let write_result = fs::write(&test_file, "ok");
-    if write_result.is_err() {
-        return false;
-    }
-    let _ = fs::remove_file(test_file);
-    true
-}
-
-fn truncate_reason(reason: &str) -> String {
-    reason.chars().take(120).collect()
-}
-
-fn calculate_directory_size(path: &Path) -> u64 {
-    let entries = match fs::read_dir(path) {
-        Ok(entries) => entries,
-        Err(_) => return 0,
-    };
-
-    let mut total: u64 = 0;
-    for entry in entries.flatten() {
-        let Ok(metadata) = entry.metadata() else {
-            continue;
-        };
-        if metadata.is_file() {
-            total = total.saturating_add(metadata.len());
-        } else if metadata.is_dir() {
-            total = total.saturating_add(calculate_directory_size(&entry.path()));
-        }
-    }
-    total
-}
-
-#[tauri::command]
-async fn check_update() -> CommandResult<Value> {
-    Ok(serde_json::json!({
-      "hasUpdate": false,
-      "latestVersion": Value::Null,
-      "url": Value::Null
-    }))
-}
-
-#[tauri::command]
-async fn get_storage_stats(state: State<'_, SharedState>) -> CommandResult<StorageStats> {
-    let state = state.0.lock().map_err(|_| "state lock poisoned".to_string())?;
-    let download_dir = PathBuf::from(&state.settings.download_dir);
-    let _ = fs::create_dir_all(&download_dir);
-
-    let stat = statvfs(&download_dir).map_err(|err| err.to_string())?;
-    let total_bytes = stat.total_space();
-    let available_bytes = stat.available_space();
-    let used_bytes = total_bytes.saturating_sub(available_bytes);
-    let used_percent = if total_bytes == 0 {
-        0.0
-    } else {
-        (used_bytes as f64 / total_bytes as f64) * 100.0
-    };
-    let download_dir_bytes = calculate_directory_size(&download_dir);
-
-    Ok(StorageStats {
-        total_bytes,
-        available_bytes,
-        used_bytes,
-        used_percent,
-        download_dir_bytes,
-    })
-}
-
-#[tauri::command]
-async fn delete_file(app: AppHandle, state: State<'_, SharedState>, path: String) -> CommandResult<QueueSnapshot> {
-    let mut state = state.0.lock().map_err(|_| "state lock poisoned".to_string())?;
-    state
-        .queue
-        .retain(|item| item.output_path.as_ref().map(|p| p != &path).unwrap_or(true));
+    path: String,
+) -> CommandResult<QueueSnapshot> {
+    let mut state = state
+        .0
+        .lock()
+        .map_err(|_| "state lock poisoned".to_string())?;
+    state.queue.retain(|item| {
+        item.output_path
+            .as_ref()
+            .map(|p| p != &path)
+            .unwrap_or(true)
+    });
     let snapshot = queue_snapshot(&state);
     emit_queue_updated(&app, &state);
     persist_queue(&app, &state);
     Ok(snapshot)
-}
-
-#[tauri::command]
-async fn open_folder(path: String) -> CommandResult<()> {
-    if path.trim().is_empty() {
-        return Ok(());
-    }
-    let normalized = PathBuf::from(path.trim());
-    let target = if normalized.exists() {
-        fs::canonicalize(&normalized).unwrap_or_else(|_| normalized.clone())
-    } else {
-        let parent = normalized
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| PathBuf::from(path.trim()));
-        if parent.exists() {
-            fs::canonicalize(&parent).unwrap_or(parent)
-        } else {
-            parent
-        }
-    };
-
-    #[cfg(target_os = "macos")]
-    {
-        if normalized.exists() && normalized.is_file() {
-            Command::new("open")
-                .arg("-R")
-                .arg(&normalized)
-                .spawn()
-                .map_err(|err| err.to_string())?;
-        } else {
-            Command::new("open")
-                .arg(&target)
-                .spawn()
-                .map_err(|err| err.to_string())?;
-        }
-    }
-    #[cfg(target_os = "windows")]
-    {
-        if normalized.exists() && normalized.is_file() {
-            let selected = fs::canonicalize(&normalized).unwrap_or_else(|_| normalized.clone());
-            Command::new("explorer")
-                .arg("/select,")
-                .arg(selected)
-                .spawn()
-                .map_err(|err| err.to_string())?;
-        } else {
-            Command::new("explorer")
-                .arg(target)
-                .spawn()
-                .map_err(|err| err.to_string())?;
-        }
-    }
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        Command::new("xdg-open")
-            .arg(&target)
-            .spawn()
-            .map_err(|err| err.to_string())?;
-    }
-    Ok(())
-}
-
-#[tauri::command]
-async fn open_external_url(url: String) -> CommandResult<()> {
-    if url.trim().is_empty() {
-        return Ok(());
-    }
-    let parsed = Url::parse(url.trim()).map_err(|_| "유효한 URL이 아닙니다.".to_string())?;
-    let scheme = parsed.scheme().to_lowercase();
-    if scheme != "http" && scheme != "https" {
-        return Err("http/https URL만 열 수 있습니다.".to_string());
-    }
-
-    let target = parsed.to_string();
-    #[cfg(target_os = "macos")]
-    {
-        Command::new("open")
-            .arg(&target)
-            .spawn()
-            .map_err(|err| err.to_string())?;
-    }
-    #[cfg(target_os = "windows")]
-    {
-        Command::new("cmd")
-            .args(["/C", "start", "", &target])
-            .spawn()
-            .map_err(|err| err.to_string())?;
-    }
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        Command::new("xdg-open")
-            .arg(&target)
-            .spawn()
-            .map_err(|err| err.to_string())?;
-    }
-    Ok(())
 }
 
 pub fn run() {
@@ -2543,7 +1528,10 @@ pub fn run() {
                         for tx in txs {
                             let _ = tx.send(());
                         }
-                        eprintln!("[STABILITY] Sent shutdown signal to {} worker thread(s)", rt.worker_handles.len());
+                        eprintln!(
+                            "[STABILITY] Sent shutdown signal to {} worker thread(s)",
+                            rt.worker_handles.len()
+                        );
                     }
                 }
             }

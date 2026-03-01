@@ -129,7 +129,10 @@ fn test_characterize_query_client_current_retry_is_1() {
     // This test documents the pre-change state for reference.
     let current_retry: u32 = 1;
     let target_retry: u32 = 3;
-    assert!(target_retry > current_retry, "Target retry should be higher than current");
+    assert!(
+        target_retry > current_retry,
+        "Target retry should be higher than current"
+    );
 }
 
 // =============================================================================
@@ -163,8 +166,16 @@ fn test_characterize_persist_queue_valid_roundtrip() {
     }
 
     let items = vec![
-        MockQueueItem { id: "abc".to_string(), status: "queued".to_string(), title: "Test".to_string() },
-        MockQueueItem { id: "def".to_string(), status: "completed".to_string(), title: "Other".to_string() },
+        MockQueueItem {
+            id: "abc".to_string(),
+            status: "queued".to_string(),
+            title: "Test".to_string(),
+        },
+        MockQueueItem {
+            id: "def".to_string(),
+            status: "completed".to_string(),
+            title: "Other".to_string(),
+        },
     ];
 
     let json = serde_json::to_string_pretty(&items).expect("serialize failed");
@@ -225,7 +236,10 @@ fn test_characterize_load_queue_downloading_resets_to_queued() {
     if status == "downloading" {
         status = "queued".to_string();
     }
-    assert_eq!(status, "queued", "downloading status must be reset to queued on load");
+    assert_eq!(
+        status, "queued",
+        "downloading status must be reset to queued on load"
+    );
 }
 
 // --- REQ-002 Characterization: File move behavior ---
@@ -245,13 +259,22 @@ fn test_characterize_move_file_same_fs_renames() {
     assert!(rename_result.is_ok(), "same-FS rename should succeed");
 
     // Source should no longer exist
-    assert!(!src_path.exists(), "source file should be gone after rename");
+    assert!(
+        !src_path.exists(),
+        "source file should be gone after rename"
+    );
     // Destination should exist
-    assert!(dst_path.exists(), "destination file should exist after rename");
+    assert!(
+        dst_path.exists(),
+        "destination file should exist after rename"
+    );
 
     // No .incomplete file should be created in simple rename
     let incomplete = PathBuf::from(format!("{}.incomplete", dst_path.display()));
-    assert!(!incomplete.exists(), "no .incomplete file should be created for same-FS rename");
+    assert!(
+        !incomplete.exists(),
+        "no .incomplete file should be created for same-FS rename"
+    );
 
     let _ = std::fs::remove_file(&dst_path);
 }
@@ -318,7 +341,10 @@ fn test_characterize_backup_path_format() {
 fn test_characterize_incomplete_marker_path_format() {
     let dest = PathBuf::from("/downloads/video.mp4");
     let incomplete = PathBuf::from(format!("{}.incomplete", dest.display()));
-    assert_eq!(incomplete.to_str().unwrap(), "/downloads/video.mp4.incomplete");
+    assert_eq!(
+        incomplete.to_str().unwrap(),
+        "/downloads/video.mp4.incomplete"
+    );
 }
 
 // =============================================================================
@@ -445,7 +471,10 @@ fn test_spec_move_atomic_same_fs_no_incomplete() {
     // Same-FS rename (no .incomplete written)
     let result = std::fs::rename(&src, &dst);
     assert!(result.is_ok(), "same-FS rename should succeed");
-    assert!(!incomplete.exists(), ".incomplete should NOT exist for same-FS rename");
+    assert!(
+        !incomplete.exists(),
+        ".incomplete should NOT exist for same-FS rename"
+    );
 
     let _ = std::fs::remove_file(&dst);
 }
@@ -476,7 +505,10 @@ fn test_spec_incomplete_marker_removed_on_scan() {
         .map(|n| n.ends_with(".incomplete"))
         .unwrap_or(false));
     let _ = std::fs::remove_file(&incomplete_path);
-    assert!(!incomplete_path.exists(), "marker should be removed after scan");
+    assert!(
+        !incomplete_path.exists(),
+        "marker should be removed after scan"
+    );
 }
 
 // --- TC-003-B: Missing settings → defaults (no events) ---
@@ -487,7 +519,10 @@ fn test_spec_load_settings_missing_preserves_defaults() {
     let path = temp_file_path("spec_missing_settings.json");
     let _ = std::fs::remove_file(&path);
     let result = std::fs::read_to_string(&path);
-    assert!(result.is_err(), "missing settings should Err → defaults used");
+    assert!(
+        result.is_err(),
+        "missing settings should Err → defaults used"
+    );
 }
 
 // --- TC-003-C: Corrupt settings + valid backup → restore + event ---
@@ -510,7 +545,10 @@ fn test_spec_settings_corrupt_with_valid_backup_restores() {
     let bak_content = std::fs::read_to_string(&bak).expect("read backup");
     let bak_parse: serde_json::Value =
         serde_json::from_str(&bak_content).expect("parse backup settings");
-    assert!(bak_parse.is_object(), "backup settings should be a JSON object");
+    assert!(
+        bak_parse.is_object(),
+        "backup settings should be a JSON object"
+    );
     assert_eq!(bak_parse["maxRetries"], 3);
 
     let _ = std::fs::remove_file(&primary);
@@ -568,9 +606,16 @@ fn test_select_format_expression_audio_fallback() {
 /// REQ-002: download args must contain --socket-timeout flag.
 #[test]
 fn test_download_args_contain_socket_timeout() {
-    let args = build_expected_download_args("bestvideo+bestaudio", "/tmp/media.%(ext)s", "http://example.com");
+    let args = build_expected_download_args(
+        "bestvideo+bestaudio",
+        "/tmp/media.%(ext)s",
+        "http://example.com",
+    );
     let flag_pos = args.iter().position(|a| a == "--socket-timeout");
-    assert!(flag_pos.is_some(), "--socket-timeout must be present in download args");
+    assert!(
+        flag_pos.is_some(),
+        "--socket-timeout must be present in download args"
+    );
     let value = &args[flag_pos.unwrap() + 1];
     assert_eq!(value, "30", "--socket-timeout value must be 30");
 }
@@ -578,9 +623,16 @@ fn test_download_args_contain_socket_timeout() {
 /// REQ-003: download args must contain --fragment-retries flag.
 #[test]
 fn test_download_args_contain_fragment_retries() {
-    let args = build_expected_download_args("bestvideo+bestaudio", "/tmp/media.%(ext)s", "http://example.com");
+    let args = build_expected_download_args(
+        "bestvideo+bestaudio",
+        "/tmp/media.%(ext)s",
+        "http://example.com",
+    );
     let flag_pos = args.iter().position(|a| a == "--fragment-retries");
-    assert!(flag_pos.is_some(), "--fragment-retries must be present in download args");
+    assert!(
+        flag_pos.is_some(),
+        "--fragment-retries must be present in download args"
+    );
     let value = &args[flag_pos.unwrap() + 1];
     assert_eq!(value, "10", "--fragment-retries value must be 10");
 }
@@ -588,7 +640,11 @@ fn test_download_args_contain_fragment_retries() {
 /// REQ-002 through REQ-006: all 5 stability flags must be present with correct values.
 #[test]
 fn test_download_args_contain_stability_flags() {
-    let args = build_expected_download_args("bestvideo+bestaudio", "/tmp/media.%(ext)s", "http://example.com");
+    let args = build_expected_download_args(
+        "bestvideo+bestaudio",
+        "/tmp/media.%(ext)s",
+        "http://example.com",
+    );
 
     // Collect all flag-value pairs for easy lookup
     let pairs: Vec<(&str, &str)> = args
@@ -602,9 +658,8 @@ fn test_download_args_contain_stability_flags() {
         })
         .collect();
 
-    let find_value = |flag: &str| -> Option<&str> {
-        pairs.iter().find(|(f, _)| *f == flag).map(|(_, v)| *v)
-    };
+    let find_value =
+        |flag: &str| -> Option<&str> { pairs.iter().find(|(f, _)| *f == flag).map(|(_, v)| *v) };
 
     assert_eq!(
         find_value("--socket-timeout"),
@@ -672,40 +727,97 @@ use tubeextract_lib::{classify_download_error, retry_delay_ms_for_strategy, Retr
 /// SPEC-STABILITY-005 REQ-001: NoRetry patterns must be classified correctly.
 #[test]
 fn test_classify_no_retry_patterns() {
-    assert_eq!(classify_download_error("Video unavailable"), RetryStrategy::NoRetry);
-    assert_eq!(classify_download_error("This is a private video"), RetryStrategy::NoRetry);
-    assert_eq!(classify_download_error("The video has been removed"), RetryStrategy::NoRetry);
-    assert_eq!(classify_download_error("This video is not available"), RetryStrategy::NoRetry);
-    assert_eq!(classify_download_error("HTTP Error 404: Not Found"), RetryStrategy::NoRetry);
-    assert_eq!(classify_download_error("HTTP Error 403: Forbidden"), RetryStrategy::NoRetry);
-    assert_eq!(classify_download_error("This video is age-restricted"), RetryStrategy::NoRetry);
-    assert_eq!(classify_download_error("This video is private"), RetryStrategy::NoRetry);
-    assert_eq!(classify_download_error("This is a members-only video"), RetryStrategy::NoRetry);
+    assert_eq!(
+        classify_download_error("Video unavailable"),
+        RetryStrategy::NoRetry
+    );
+    assert_eq!(
+        classify_download_error("This is a private video"),
+        RetryStrategy::NoRetry
+    );
+    assert_eq!(
+        classify_download_error("The video has been removed"),
+        RetryStrategy::NoRetry
+    );
+    assert_eq!(
+        classify_download_error("This video is not available"),
+        RetryStrategy::NoRetry
+    );
+    assert_eq!(
+        classify_download_error("HTTP Error 404: Not Found"),
+        RetryStrategy::NoRetry
+    );
+    assert_eq!(
+        classify_download_error("HTTP Error 403: Forbidden"),
+        RetryStrategy::NoRetry
+    );
+    assert_eq!(
+        classify_download_error("This video is age-restricted"),
+        RetryStrategy::NoRetry
+    );
+    assert_eq!(
+        classify_download_error("This video is private"),
+        RetryStrategy::NoRetry
+    );
+    assert_eq!(
+        classify_download_error("This is a members-only video"),
+        RetryStrategy::NoRetry
+    );
 }
 
 /// SPEC-STABILITY-005 REQ-001: RateLimit patterns must be classified correctly.
 #[test]
 fn test_classify_rate_limit_patterns() {
-    assert_eq!(classify_download_error("HTTP Error 429: Too Many Requests"), RetryStrategy::RateLimit);
-    assert_eq!(classify_download_error("Too many requests sent"), RetryStrategy::RateLimit);
-    assert_eq!(classify_download_error("rate limit exceeded"), RetryStrategy::RateLimit);
+    assert_eq!(
+        classify_download_error("HTTP Error 429: Too Many Requests"),
+        RetryStrategy::RateLimit
+    );
+    assert_eq!(
+        classify_download_error("Too many requests sent"),
+        RetryStrategy::RateLimit
+    );
+    assert_eq!(
+        classify_download_error("rate limit exceeded"),
+        RetryStrategy::RateLimit
+    );
 }
 
 /// SPEC-STABILITY-005 REQ-001: NetworkError patterns must be classified correctly.
 #[test]
 fn test_classify_network_error_patterns() {
-    assert_eq!(classify_download_error("Connection refused"), RetryStrategy::NetworkError);
-    assert_eq!(classify_download_error("Network is unreachable"), RetryStrategy::NetworkError);
-    assert_eq!(classify_download_error("Name or service not known"), RetryStrategy::NetworkError);
-    assert_eq!(classify_download_error("Connection timed out"), RetryStrategy::NetworkError);
-    assert_eq!(classify_download_error("socket hang up"), RetryStrategy::NetworkError);
+    assert_eq!(
+        classify_download_error("Connection refused"),
+        RetryStrategy::NetworkError
+    );
+    assert_eq!(
+        classify_download_error("Network is unreachable"),
+        RetryStrategy::NetworkError
+    );
+    assert_eq!(
+        classify_download_error("Name or service not known"),
+        RetryStrategy::NetworkError
+    );
+    assert_eq!(
+        classify_download_error("Connection timed out"),
+        RetryStrategy::NetworkError
+    );
+    assert_eq!(
+        classify_download_error("socket hang up"),
+        RetryStrategy::NetworkError
+    );
 }
 
 /// SPEC-STABILITY-005 REQ-005: Unclassified errors must return Default strategy.
 #[test]
 fn test_classify_default_for_unknown_errors() {
-    assert_eq!(classify_download_error("Some unknown error occurred"), RetryStrategy::Default);
-    assert_eq!(classify_download_error("ffmpeg exited with code 1"), RetryStrategy::Default);
+    assert_eq!(
+        classify_download_error("Some unknown error occurred"),
+        RetryStrategy::Default
+    );
+    assert_eq!(
+        classify_download_error("ffmpeg exited with code 1"),
+        RetryStrategy::Default
+    );
     assert_eq!(classify_download_error(""), RetryStrategy::Default);
 }
 
@@ -720,31 +832,76 @@ fn test_classify_socket_with_http_40x_is_not_network_error() {
 /// SPEC-STABILITY-005 REQ-003: RateLimit strategy uses 30s+ delay table.
 #[test]
 fn test_retry_delay_rate_limit_strategy() {
-    assert_eq!(retry_delay_ms_for_strategy(&RetryStrategy::RateLimit, 0), 30_000);
-    assert_eq!(retry_delay_ms_for_strategy(&RetryStrategy::RateLimit, 1), 60_000);
-    assert_eq!(retry_delay_ms_for_strategy(&RetryStrategy::RateLimit, 2), 120_000);
-    assert_eq!(retry_delay_ms_for_strategy(&RetryStrategy::RateLimit, 3), 120_000);
+    assert_eq!(
+        retry_delay_ms_for_strategy(&RetryStrategy::RateLimit, 0),
+        30_000
+    );
+    assert_eq!(
+        retry_delay_ms_for_strategy(&RetryStrategy::RateLimit, 1),
+        60_000
+    );
+    assert_eq!(
+        retry_delay_ms_for_strategy(&RetryStrategy::RateLimit, 2),
+        120_000
+    );
+    assert_eq!(
+        retry_delay_ms_for_strategy(&RetryStrategy::RateLimit, 3),
+        120_000
+    );
     // Out-of-bounds attempt clamps to last entry
-    assert_eq!(retry_delay_ms_for_strategy(&RetryStrategy::RateLimit, 99), 120_000);
+    assert_eq!(
+        retry_delay_ms_for_strategy(&RetryStrategy::RateLimit, 99),
+        120_000
+    );
 }
 
 /// SPEC-STABILITY-005 REQ-004: NetworkError strategy uses 1s short delay table.
 #[test]
 fn test_retry_delay_network_error_strategy() {
-    assert_eq!(retry_delay_ms_for_strategy(&RetryStrategy::NetworkError, 0), 1_000);
-    assert_eq!(retry_delay_ms_for_strategy(&RetryStrategy::NetworkError, 1), 2_000);
-    assert_eq!(retry_delay_ms_for_strategy(&RetryStrategy::NetworkError, 2), 5_000);
-    assert_eq!(retry_delay_ms_for_strategy(&RetryStrategy::NetworkError, 3), 10_000);
+    assert_eq!(
+        retry_delay_ms_for_strategy(&RetryStrategy::NetworkError, 0),
+        1_000
+    );
+    assert_eq!(
+        retry_delay_ms_for_strategy(&RetryStrategy::NetworkError, 1),
+        2_000
+    );
+    assert_eq!(
+        retry_delay_ms_for_strategy(&RetryStrategy::NetworkError, 2),
+        5_000
+    );
+    assert_eq!(
+        retry_delay_ms_for_strategy(&RetryStrategy::NetworkError, 3),
+        10_000
+    );
     // Out-of-bounds attempt clamps to last entry
-    assert_eq!(retry_delay_ms_for_strategy(&RetryStrategy::NetworkError, 99), 10_000);
+    assert_eq!(
+        retry_delay_ms_for_strategy(&RetryStrategy::NetworkError, 99),
+        10_000
+    );
 }
 
 /// SPEC-STABILITY-005 REQ-005: Default strategy preserves existing RETRY_DELAY_TABLE_MS.
 #[test]
 fn test_retry_delay_default_strategy_unchanged() {
-    assert_eq!(retry_delay_ms_for_strategy(&RetryStrategy::Default, 0), 2_000);
-    assert_eq!(retry_delay_ms_for_strategy(&RetryStrategy::Default, 1), 5_000);
-    assert_eq!(retry_delay_ms_for_strategy(&RetryStrategy::Default, 2), 10_000);
-    assert_eq!(retry_delay_ms_for_strategy(&RetryStrategy::Default, 3), 15_000);
-    assert_eq!(retry_delay_ms_for_strategy(&RetryStrategy::Default, 99), 15_000);
+    assert_eq!(
+        retry_delay_ms_for_strategy(&RetryStrategy::Default, 0),
+        2_000
+    );
+    assert_eq!(
+        retry_delay_ms_for_strategy(&RetryStrategy::Default, 1),
+        5_000
+    );
+    assert_eq!(
+        retry_delay_ms_for_strategy(&RetryStrategy::Default, 2),
+        10_000
+    );
+    assert_eq!(
+        retry_delay_ms_for_strategy(&RetryStrategy::Default, 3),
+        15_000
+    );
+    assert_eq!(
+        retry_delay_ms_for_strategy(&RetryStrategy::Default, 99),
+        15_000
+    );
 }
