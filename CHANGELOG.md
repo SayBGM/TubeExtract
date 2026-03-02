@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Automated Release Command (SPEC-UPDATE-001)**: New `npm run release` command for automated versioning and publishing
+  - `scripts/release.js` implements semantic versioning with `--patch`, `--minor`, `--major`, `--version X.Y.Z` flags
+  - Validates clean git working tree before proceeding with release
+  - Atomically updates `package.json`, `src-tauri/tauri.conf.json`, and `src-tauri/Cargo.toml` versions
+  - Creates git commit with `chore(release): v{version}` message, applies version tag, and pushes to remote
+  - Registered as npm script: `"release": "node scripts/release.js"` in package.json
+
+### Fixed
+
+- **Auto-Update Verification (SPEC-UPDATE-001)**: `check_update()` now queries GitHub Releases API instead of returning stub value
+  - Calls GitHub Releases API (`https://api.github.com/repos/SayBGM/TubeExtract/releases/latest`) to fetch latest version information
+  - Returns accurate `hasUpdate` boolean, `latestVersion` string, and download URL
+  - Graceful error handling: returns `hasUpdate: false` on network failures, timeouts, or JSON parsing errors
+  - No app crashes on API failures; errors logged and safely handled
+  - Maintains browser-based download flow: users open GitHub release page directly instead of in-app update
+- **CI/CD Release Pipeline**: Updated `.github/workflows/release.yml` to synchronize `src-tauri/Cargo.toml` version
+  - Previously only `package.json` and `src-tauri/tauri.conf.json` were updated during CI release
+  - Now all three files are kept in sync with the git version tag
+
 ### Refactored
 
 - **lib.rs Modularization (SPEC-REFACTOR-001)**: Split 2,491-line monolithic lib.rs into 10 focused modules
