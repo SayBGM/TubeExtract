@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Refactored
+
+- **lib.rs Modularization (SPEC-REFACTOR-001)**: Split 2,491-line monolithic lib.rs into 10 focused modules
+  - `state.rs` - Mutex recovery helper (`lock_or_recover`) and shared state types
+  - `types.rs` - `CommandResult<T>` type alias for unified command return types
+  - `utils.rs` - Pure parsing helpers (progress percentage, speed, ETA calculation, file name sanitization)
+  - `file_ops.rs` - Atomic file I/O operations, process execution, and executable resolution
+  - `dependencies.rs` - yt-dlp and ffmpeg bootstrap with platform-specific installation and version checking
+  - `diagnostics.rs` - System diagnostics, update checks, and storage statistics (5 Tauri commands)
+  - `settings.rs` - Application settings persistence with automatic backup recovery and validation
+  - `metadata.rs` - URL analysis and quality option discovery for video/audio formats
+  - `queue.rs` - Download queue management with state persistence and event emission (8 Tauri commands)
+  - `download.rs` - Core download worker with intelligent retry strategy and concurrent download support
+  - All 95 tests passing: 21 (phase 1) + 17 (phase 2) + 19 (phase 3) + 38 (stability)
+  - Public doc comments added to all exported functions, types, and modules
+  - `lib.rs` reduced to 130 lines (from 2,491) with improved readability and maintainability
+
 ### Added
 
 - **Data Integrity & Corruption Recovery (SPEC-STABILITY-002)**

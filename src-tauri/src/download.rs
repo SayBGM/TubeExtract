@@ -117,6 +117,8 @@ pub fn retry_delay_ms_for_strategy(strategy: &RetryStrategy, attempt: usize) -> 
 // ============================================================================
 
 /// Kills all active yt-dlp subprocesses without waiting for graceful shutdown.
+// @MX:ANCHOR: [AUTO] Critical cleanup function for terminating download workers.
+// @MX:REASON: [AUTO] High fan_in: pause_job, cancel_job, and clear_terminal_jobs spawn threads that call this.
 pub fn kill_active_child_unchecked(runtime: &Arc<Mutex<RuntimeState>>) {
     let children: Vec<Arc<Mutex<Child>>> = runtime
         .lock()

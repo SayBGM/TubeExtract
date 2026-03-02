@@ -72,6 +72,8 @@ pub fn default_settings() -> AppSettings {
 // ============================================================================
 
 /// Persists settings to disk atomically, writing a backup after success.
+// @MX:ANCHOR: [AUTO] Central settings persistence point — all configuration changes flow through here.
+// @MX:REASON: [AUTO] High fan_in: set_settings command and initialization code call this to persist user preferences.
 pub fn persist_settings(app: &AppHandle, settings: &AppSettings) {
     let path = settings_file_path(app);
     if let Ok(serialized) = serde_json::to_string_pretty(settings) {

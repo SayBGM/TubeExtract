@@ -359,3 +359,36 @@ pub fn run() { ... }
 | REQ-005 | 전체 | 18개 커맨드 동작 동일 |
 | REQ-006 | 전체 | pub 항목 100% 문서화 |
 | REQ-007 | 전체 | cargo 품질 게이트 통과 |
+
+---
+
+## 구현 완료 노트 (Implementation Notes) — 2026-03-02
+
+**상태**: COMPLETED
+
+### 계획 대비 실제 구현
+
+모든 7개 REQ 요구사항이 계획 대로 구현되었습니다. 원본 계획과의 편차:
+
+- **범위**: `DownloadStatus` enum (REQ-003) 도입이 연기됨 — DDD 원칙(개선 전 동작 보존)에 따라 매직 문자열 비교 유지
+- **모듈 개수**: 10개 모듈 생성 (state, types, utils, file_ops, dependencies, diagnostics, settings, metadata, queue, download)
+- **lib.rs 크기**: 130줄 (계획: ~80줄 — `get_dependency_bootstrap_status` 커맨드를 이동할 수 없어 증가)
+- **테스트**: 총 95개 테스트 (21+17+19+38), 모두 통과
+
+### 핵심 설계 결정
+
+1. **Mutex 복구 전략**: `lock_or_recover<T>()`는 패닉 복구를 사용하여 뮤텍스 중독 상황에서 복원력 있음
+
+2. **범용 JSON 로더 헬퍼**: `load_json_with_recovery<T, FnMut>()` 범용 헬퍼로 설정/큐 로드 코드 중복 제거
+
+3. **테스트 호환성**: lib.rs의 `pub use`를 통해 통합 테스트의 외부 재export 호환성 유지
+
+### @MX 태그 적용
+
+고팬인(fan_in >= 3) 함수에 @MX:ANCHOR 태그 추가:
+
+- `queue_snapshot()` - fan_in=10 (모든 큐 커맨드, 워커 스레드)
+- `persist_queue()` - fan_in=8 (cancel, pause, resume, enqueue, 워커, clear_terminal)
+- `persist_settings()` - fan_in=3+ (set_settings 커맨드 및 초기화)
+- `start_worker_if_needed()` - fan_in>=3 (enqueue, resume, lib.rs setup)
+- `kill_active_child_unchecked()` - fan_in>=2 (pause, cancel, clear_terminal)
