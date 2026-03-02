@@ -15,6 +15,7 @@ const QUEUE_FILE: &str = "queue_state.json";
 const SETTINGS_FILE: &str = "settings.json";
 const MANAGED_BIN_DIR: &str = "bin";
 
+/// Well-known directories to search for yt-dlp and ffmpeg on Windows.
 #[cfg(target_os = "windows")]
 pub const COMMON_BINARY_DIRS: &[&str] = &[
     "C:\\Program Files\\yt-dlp",
@@ -22,6 +23,7 @@ pub const COMMON_BINARY_DIRS: &[&str] = &[
     "C:\\Windows\\System32",
 ];
 
+/// Well-known directories to search for yt-dlp and ffmpeg on non-Windows platforms.
 #[cfg(not(target_os = "windows"))]
 pub const COMMON_BINARY_DIRS: &[&str] =
     &["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"];
