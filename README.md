@@ -47,6 +47,7 @@ npm run tauri:dev
 - `npm run lint`: ESLint 실행
 - `npm run test`: Vitest 실행
 - `npm run test:watch`: Vitest watch 모드
+- `npm run release -- --patch|--minor|--major|--version X.Y.Z`: 자동 릴리즈 (버전 업데이트, 태그 생성, 푸시)
 
 ## 테스트
 

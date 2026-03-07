@@ -20,6 +20,8 @@ yt-downloder/
 │   └── workflows/                     # GitHub Actions automation
 │       ├── tests.yml                  # Test pipeline
 │       └── release.yml                # Release automation
+├── scripts/                           # Build and release scripts
+│   └── release.js                     # Automated release script
 ├── public/                            # Static assets
 ├── src/                               # React frontend source
 │   ├── main.tsx                       # App entry point

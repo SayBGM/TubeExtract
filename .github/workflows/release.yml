@@ -47,7 +47,15 @@ jobs:
             const json = JSON.parse(fs.readFileSync(file, 'utf8'));
             json.version = version;
             fs.writeFileSync(file, JSON.stringify(json, null, 2) + '\n');
+            console.log('Updated', file);
           }
+
+          // Sync Cargo.toml [package] version (first version = "..." line only)
+          const cargoPath = 'src-tauri/Cargo.toml';
+          let cargoContent = fs.readFileSync(cargoPath, 'utf8');
+          cargoContent = cargoContent.replace(/^(version\s*=\s*)"[^"]*"/m, `$1"${version}"`);
+          fs.writeFileSync(cargoPath, cargoContent);
+          console.log('Updated', cargoPath);
           NODE
 
       - name: Validate Cargo.toml
