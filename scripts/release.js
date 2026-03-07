@@ -11,12 +11,12 @@
  * Then creates a git commit and tag, and pushes both to the remote.
  */
 
-'use strict';
+import fs from 'fs';
+import path from 'path';
+import { execSync } from 'child_process';
+import { fileURLToPath } from 'url';
 
-const fs = require('fs');
-const path = require('path');
-const { execSync } = require('child_process');
-
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.join(__dirname, '..');
 
 function run(cmd, opts = {}) {
