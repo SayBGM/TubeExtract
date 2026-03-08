@@ -28,3 +28,5 @@ dist-ssr
 # Bundled external tools for Windows installer (generated during build/CI)
 src-tauri/resources/bin/*.exe
 !src-tauri/resources/bin/.gitkeep
+test-results/
+playwright-report/
